@@ -1,0 +1,44 @@
+project:
+  name: cloudie
+  seed: 42
+  honesty: >
+    No trained weights are shipped. Smoke images are synthetic.
+    Cloudie is not an operational forecast or warning system.
+paths:
+  manifest: data/manifest.csv
+  artifacts: artifacts
+  reports: reports
+data:
+  image_size: 128
+  channels: 1
+  normalize: zscore
+  max_missing_fraction: 0.30
+  plausible_wind_kt: [0, 200]
+  # Project bins, not an IMD warning. 90 kt is VSCS here; the July 2024
+  # IMD 3-minute sheet starts Extremely Severe at 90 kt. See README.
+  imd5_edges_kt: [17, 34, 48, 64, 91]
+  imd5_names: [D_DD, CS, SCS, VSCS, ESCS_SUCS]
+split:
+  strategy: storm_wise
+  test_fraction: 0.2
+  val_fraction: 0.2
+  holdout_years: []
+  holdout_basin: null
+  seed: 42
+model:
+  name: simple_cnn
+  pretrained: false
+  dropout: 0.3
+  mc_samples: 20
+train:
+  batch_size: 16
+  epochs: 20
+  lr: 0.001
+  weight_decay: 0.0001
+  patience: 5
+forbidden_features:
+  - wind_speed_kt
+  - r34_nmi
+  - rmw_nmi
+  - imd5_class
+  - intensity_bin
