@@ -6,13 +6,14 @@ Cloudie is a leak-free pipeline for tropical-cyclone intensity regression from s
 
 ## Methodology
 
-Phase 0–1 implements the controls below. It does not implement feature baselines, a training loop, or a demo app.
+Phase 0–1 implements the split and schema controls below. Phase 3 adds a training loop and an evaluation report. It does not implement feature baselines or a demo app. A smoke fit is not a result.
 
 - Splits are `storm_wise`, `chronological` (a year block), or `holdout_basin`. Random frame splits raise `LeakageError`. A storm that crosses a year or basin boundary is not cut.
 - Mean and standard deviation for normalization are fit on the train split only.
 - Previous-frame links that leave the row's split are removed before any later temporal feature can see them.
 - Primary-model inputs exclude `wind_speed_kt`, `r34_nmi`, `rmw_nmi`, `imd5_class`, and `intensity_bin`.
-- Model interfaces, unused until a training phase: a train-set mean baseline, `SimpleCNN`, and ResNet-18 with a one-channel image repeated to three channels so a pretrained first convolution can be kept. Monte Carlo dropout puts BatchNorm in eval and Dropout in train.
+- The training loop reads `config/config.yaml`. It stops after `train.patience` validation checks without an improvement, writes a checkpoint under `artifacts/`, and compares the test split with the train-set mean. The wind loss is weighted Smooth L1. An auxiliary class loss uses weights fit on the train split only. There is no size term.
+- Model interfaces: a train-set mean baseline, `SimpleCNN`, and ResNet-18 with a one-channel image repeated to three channels so a pretrained first convolution can be kept. Monte Carlo dropout puts BatchNorm in eval and Dropout in train. `pretrained: true` is refused unless a local environment variable allows the ImageNet download.
 
 ## Project classes
 
@@ -28,7 +29,8 @@ They group India Meteorological Department categories (Depression with Deep Depr
 | Best-track intensity used as an input | `forbidden_features` | Listed and rejected as a design rule; no feature builder yet |
 | No uncertainty estimate | `mc_dropout_predict` | Interface only. The std is not a calibrated interval |
 | Single-basin claims | `holdout_basin` | Split exists. No cross-basin score |
-| Extreme-intensity error hidden by a single MAE | `metrics_by_class` | Function exists. Tables are empty |
+| Extreme-intensity error hidden by a single MAE | `metrics_by_class` | Function exists. The results table below stays empty |
+| No training loop | `cloudie/train.py` | Runs on smoke data as a software check. No real-data score |
 | Little use of storm history | `null_cross_split_links` | Links cannot cross a split. ConvLSTM is not implemented |
 
 ## Results

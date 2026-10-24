@@ -1,6 +1,8 @@
 # Cloud agent handoff
 
-Phase 0–1 is in this repository. Continue from these modules. Do not restart the package under `src/`. The import root is `cloudie`.
+Phase 0–1 and Phase 3 are in this repository. Continue from these modules. Do not restart the package under `src/`. The import root is `cloudie`.
+
+Phase 3 is `cloudie/train.py` and `cloudie/evaluate.py`. Early stopping reads `train.patience`. Checkpoints go under `paths.artifacts` and are gitignored. The loss is weighted Smooth L1 on wind, with an auxiliary class loss weighted by `train.class_loss_weight`. Class weights are fit on the train split only. There is no size term. The comparison baseline is the train-set mean. `notebooks/smoke_train.ipynb` says the images are synthetic. Do not paste a smoke MAE into `docs/PROJECT_DOCUMENTATION.md`. `pretrained: true` still refuses to download ImageNet weights unless `CLOUDIE_ALLOW_PRETRAINED=1`.
 
 ## Hard constraints
 
@@ -18,7 +20,7 @@ Phase 0–1 is in this repository. Continue from these modules. Do not restart t
 - Southern Hemisphere TCIR frames are not silently flipped.
 - Do not apply the project class names to a wind column unless `wind_averaging` is a single recorded period.
 
-## Next: Phase 2, classical baselines
+## Still open: Phase 2, classical baselines
 
 Add `cloudie/features.py` and `cloudie/baselines.py`.
 
@@ -33,10 +35,9 @@ Features per image, fit and selected on train storms only:
 
 Models: the existing train-set mean predictor, then ridge, random forest, and XGBoost if it is installed. Group by `storm_id`. Write comparison tables with empty operational-baseline columns (ADT, SATCON, Dvorak stay blank until those outputs are actually joined). Map each feature to the literature survey in `docs/PROJECT_DOCUMENTATION.md` without claiming a skill gain.
 
-## After Phase 2 tests pass
+## Next
 
-1. `cloudie/train.py` and `cloudie/evaluate.py`: early stopping from `train.patience`, checkpoints under `artifacts/`, MAE / RMSE / bias, per-class error, and a residual plot. Compare with `mean_baseline`. A Colab notebook can live in `notebooks/` and must say that smoke data is synthetic.
-2. `cloudie/predict.py` and a Streamlit app. If the checkpoint is missing or was fit on smoke data, show a banner and refuse to present the number as a forecast.
-3. Optional 4-frame ConvLSTM, and a size head only after `r34_nmi` / `rmw_nmi` exist as labels. Do not feed best-track intensity into that head.
+1. `cloudie/predict.py` and a Streamlit app. If the checkpoint is missing or was fit on smoke data, show a banner and refuse to present the number as a forecast. Phase 3 already stores `is_synthetic` and `present_as_forecast: false` on the checkpoint.
+2. Optional 4-frame ConvLSTM, and a size head only after `r34_nmi` / `rmw_nmi` exist as labels. Do not feed best-track intensity into that head.
 
-Loss, when training arrives: weighted Smooth L1 on wind. A class loss is auxiliary. There is no size term until size labels exist.
+The training loss is weighted Smooth L1 on wind. A class loss is auxiliary. There is no size term until size labels exist.
