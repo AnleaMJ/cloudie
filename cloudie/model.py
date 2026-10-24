@@ -11,6 +11,7 @@ class SimpleCNN(nn.Module):
 
     def __init__(self, in_channels: int = 1, dropout: float = 0.3) -> None:
         super().__init__()
+        self.feature_dim = 64
         self.features = nn.Sequential(
             nn.Conv2d(in_channels, 16, 3, padding=1),
             nn.ReLU(),
@@ -24,8 +25,11 @@ class SimpleCNN(nn.Module):
         )
         self.head = nn.Sequential(nn.Flatten(), nn.Dropout(dropout), nn.Linear(64, 1))
 
+    def encode(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.features(inputs).flatten(1)
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.head(self.features(inputs))
+        return self.head(self.encode(inputs))
 
 
 class ResNetRegressor(nn.Module):
@@ -51,13 +55,17 @@ class ResNetRegressor(nn.Module):
         in_features = backbone.fc.in_features
         backbone.fc = nn.Identity()
         self.backbone = backbone
+        self.feature_dim = in_features
         self.repeat_to_rgb = in_channels == 1
         self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(in_features, 1))
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+    def encode(self, inputs: torch.Tensor) -> torch.Tensor:
         if self.repeat_to_rgb and inputs.shape[1] == 1:
             inputs = inputs.repeat(1, 3, 1, 1)
-        return self.head(self.backbone(inputs))
+        return self.backbone(inputs)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.head(self.encode(inputs))
 
 
 def enable_mc_dropout(module: nn.Module) -> None:

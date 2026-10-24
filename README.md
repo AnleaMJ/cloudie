@@ -4,7 +4,7 @@ Cloudie estimates tropical-cyclone maximum sustained wind speed, in knots, from 
 
 Repository: https://github.com/AnleaMJ/cloudie
 
-This revision is Phase 0–1: manifest schema and quality gates, storm-safe splits, image preprocessing, regression metrics, a synthetic smoke-data generator, YAML configs, and model interfaces (`SimpleCNN`, a ResNet-18 regressor, and Monte Carlo dropout). Classical feature baselines, the training loop, evaluation figures, and a Streamlit demo are later phases. See `docs/AGENT_HANDOFF.md` and `docs/PROJECT_DOCUMENTATION.md`.
+This revision is Phase 0–1 plus Phase 3. Phase 0–1 is the manifest schema and quality gates, storm-safe splits, image preprocessing, regression metrics, a synthetic smoke-data generator, YAML configs, and model interfaces (`SimpleCNN`, a ResNet-18 regressor, and Monte Carlo dropout). Phase 3 is `cloudie/train.py` and `cloudie/evaluate.py`: early stopping from `train.patience`, a checkpoint under `artifacts/`, MAE / RMSE / bias, per-class error, a residual plot, and a comparison with the train-set mean. Classical feature baselines and the Streamlit demo are still later work. See `docs/AGENT_HANDOFF.md` and `docs/PROJECT_DOCUMENTATION.md`.
 
 ## Limitations
 
@@ -30,7 +30,16 @@ python -m cloudie.make_smoke_data --out data/smoke
 
 `make test` and `make smoke` run the same two commands.
 
-`requirements-train.txt` adds PyTorch, torchvision, matplotlib, and h5py for a later training phase. Continuous integration installs `requirements.txt` only. The SimpleCNN forward-pass test skips when torch is absent.
+`requirements-train.txt` adds PyTorch, torchvision, matplotlib, and h5py. Continuous integration installs `requirements.txt` only. Training tests and the SimpleCNN forward-pass test skip when torch is absent.
+
+A smoke training check needs the train extras. It does not produce a score to quote:
+
+```bash
+pip install -r requirements-train.txt
+make train-smoke
+```
+
+`notebooks/smoke_train.ipynb` runs the same check and states that the images are synthetic.
 
 Smoke images and manifests under `data/` are gitignored, along with `artifacts/`, `reports/` (except the placeholder files), `*.pt`, `*.ckpt`, and `*.h5`.
 
@@ -89,13 +98,13 @@ Nothing in this table is vendored in the repository. Licensing notes are the pro
 ## Layout
 
 ```
-cloudie/                 schema, splits, preprocessing, loader, metrics, smoke data, models
+cloudie/                 schema, splits, preprocessing, loader, metrics, smoke data, models, train, evaluate
 config/                  config.yaml and config_smoke.yaml
-tests/test_framework.py  pytest, using temporary smoke data
+tests/                   pytest, using temporary smoke data
 docs/                    data sources, project notes, next-phase handoff
 .github/workflows/ci.yml pip install -r requirements.txt && pytest
 data/ artifacts/ reports/   gitignored outputs, with .gitkeep placeholders
-notebooks/               placeholder for a later training notebook
+notebooks/smoke_train.ipynb  synthetic training check; do not report scores
 ```
 
 This repository does not choose a code license. Third-party data remains under the terms above and is not included.
