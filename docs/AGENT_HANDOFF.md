@@ -27,7 +27,10 @@ number. A frame outside the checkpoint's infrared values, or a wind outside
 `data.plausible_wind_kt` (0–200), returns no number and no confidence.
 Smoke checkpoints keep the synthetic banner. `predict.advisory_jump_kt`
 is a review flag, not a warning threshold. Dropout standard deviation is not
-the displayed score and is not a calibrated interval.
+the displayed score and is not a calibrated interval. Vercel loads the
+repository-root `app.py` (`tool.vercel.entrypoint`). `streamlit run cloudie/app.py`
+remains the local page. Weights stay gitignored, so a deployment with no
+checkpoint file still returns no number.
 
 Phase 5 is `ConvLSTMRegressor` and `cloudie/sequences.py`. `model.name: convlstm`
 uses 4 frames from the same storm and the same split. A previous-frame link
