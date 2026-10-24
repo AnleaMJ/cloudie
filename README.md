@@ -53,7 +53,9 @@ The deep path is `cloudie/`:
   category. Pull current status from IMD reads the public Infrared-1
   JPEG and runs that same result. A wind outside 0–200 kt, or a frame
   outside the checkpoint's infrared values, produces no number and no
-  confidence. A missing checkpoint produces no number.
+  confidence. A missing checkpoint produces no number. Vercel loads the
+  repository-root `app.py`. `streamlit run cloudie/app.py` remains the
+  local page.
 - Phase 5 is an optional 4-frame ConvLSTM (`model.name: convlstm`). The size
   head exists only when the train split has `r34_nmi` and `rmw_nmi`.
 
