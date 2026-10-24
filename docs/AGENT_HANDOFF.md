@@ -18,7 +18,10 @@ refuses to download ImageNet weights unless `CLOUDIE_ALLOW_PRETRAINED=1`.
 
 Phase 4 is `cloudie/predict.py` and `cloudie/app.py`. The page reports wind
 speed in knots, the project intensity category of that wind, and the share
-of model samples in that category (`model.mc_samples`). `present_as_forecast`
+of model samples in that category (`model.mc_samples`). The button
+`Pull current status from IMD` reads the public Infrared-1 JPEG from
+`cloudie/imd_satellite.py` at request time and does not store it. Tests
+pass a response in and must not download that JPEG. `present_as_forecast`
 stays false. A missing checkpoint or a failed missing-pixel gate returns no
 number. Smoke checkpoints keep the synthetic banner. `predict.advisory_jump_kt`
 is a review flag, not a warning threshold. Dropout standard deviation is not

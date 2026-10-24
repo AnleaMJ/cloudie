@@ -50,7 +50,8 @@ The deep path is `cloudie/`:
 - Phase 4 is `cloudie/predict.py` and `streamlit run cloudie/app.py`.
   The page reports wind speed in knots, the intensity category of that
   wind, and a confidence score: the share of model samples in that
-  category. A missing checkpoint produces no number.
+  category. Pull current status from IMD reads the public Infrared-1
+  JPEG and runs that same result. A missing checkpoint produces no number.
 - Phase 5 is an optional 4-frame ConvLSTM (`model.name: convlstm`). The size
   head exists only when the train split has `r34_nmi` and `rmw_nmi`.
 
@@ -88,8 +89,9 @@ streamlit run cloudie/app.py
 If `artifacts/checkpoint.pt` is missing, the page shows a banner and does
 not present a forecast. A smoke checkpoint keeps the synthetic banner. The
 confidence score is the share of model samples in the predicted category
-(`model.mc_samples`). Four uploaded frames, named in time order, are the
-input when the checkpoint is the ConvLSTM.
+(`model.mc_samples`). Pull current status from IMD reads the public
+Infrared-1 JPEG at request time and does not store it. Four uploaded
+frames, named in time order, are the input when the checkpoint is the ConvLSTM.
 
 ## Splits
 
