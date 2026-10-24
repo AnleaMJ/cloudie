@@ -88,3 +88,13 @@ def dn_to_brightness_temperature(
 ) -> np.ndarray:
     """Apply a caller-supplied calibration. This does not look up a sensor table."""
     return np.asarray(dn, dtype=np.float32) * float(gain) + float(offset)
+
+
+def leave_unflipped(image: np.ndarray, hemisphere: str | None = None) -> np.ndarray:
+    """Use the frame as stored.
+
+    Southern Hemisphere TCIR imagery is not mirrored. ``hemisphere`` records
+    the caller's label and does not change the array.
+    """
+    del hemisphere
+    return np.asarray(image)

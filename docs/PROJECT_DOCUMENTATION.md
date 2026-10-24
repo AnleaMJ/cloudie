@@ -4,22 +4,45 @@
 
 A leak-free pipeline for tropical-cyclone intensity regression from infrared
 imagery. Classical feature baselines are implemented so a later neural net
-has something honest to beat. No experiment has been run. No performance
-number in the literature survey is a result of this repository.
+has something honest to beat. The deep path can train, evaluate, and show a
+model output. No experiment has been run. No performance number in the
+literature survey is a result of this repository.
 
 ## Methodology
 
 Outer splits are storm-wise, year-block, or basin-holdout. A storm is never
 cut. The test side of that split is locked: feature selection, SMOTE, and
-model fits see training storms only, and the comparison score is computed
-on validation storms.
+model fits see training storms only. Phase 2 scores the validation storms.
+The deep path in `cloudie/` also reports the test split against the train-set
+mean, and that report is a software check until the imagery is real.
 
-Inner comparison uses `StratifiedGroupKFold` on training storms, stratified
-by the project class and grouped by `storm_id`. SMOTE, when enabled, runs
-inside the current training fold and only for classification. Regression
-uses the training labels as they are. Class weights are the fallback when
-SMOTE is off or a fold is too small for it, except for k-nearest neighbors,
-which has no class-weight parameter.
+Inner comparison for the classical models uses `StratifiedGroupKFold` on
+training storms, stratified by the project class and grouped by `storm_id`.
+SMOTE, when enabled, runs inside the current training fold and only for
+classification. Regression uses the training labels as they are. Class
+weights are the fallback when SMOTE is off or a fold is too small for it,
+except for k-nearest neighbors, which has no class-weight parameter.
+
+`cloudie/train.py` stops after `train.patience` validation checks without an
+improvement and writes a checkpoint under `artifacts/`. The wind loss is
+weighted Smooth L1. An auxiliary class loss uses weights fit on the train
+split only. A size term is added only when the train split has finite
+`r34_nmi` and `rmw_nmi`. Best-track wind is not an input to that head.
+
+Model interfaces on the deep path: a train-set mean baseline, `SimpleCNN`,
+ResNet-18 with a one-channel image repeated to three channels so a pretrained
+first convolution can be kept, and an optional 4-frame ConvLSTM (Shi et al.,
+NeurIPS 2015, written for precipitation nowcasting). The sequence model is
+not a claim of intensity skill. Windows stay inside one storm and one split.
+Monte Carlo dropout puts BatchNorm in eval and Dropout in train.
+`pretrained: true` is refused unless a local environment variable allows the
+ImageNet download. Southern Hemisphere frames are not flipped.
+
+`cloudie/predict.py` and the Streamlit page read a checkpoint.
+`present_as_forecast` stays false. A missing file or a failed missing-pixel
+gate produces no number. A jump versus a last advisory, a project-class
+change, and a dropout spread that crosses a class edge are review notes.
+The dropout standard deviation is not a calibrated interval.
 
 Normalization statistics for the deep path fit on train only. Classical
 features are computed on the native image, not on a z-scored tensor, so
@@ -61,6 +84,9 @@ the same MAE inside each project class, and macro-F1 with per-class recall.
 Accuracy is not the headline. ADT, SATCON, and Dvorak columns are present
 and empty.
 
+The deep path adds `SimpleCNN`, ResNet-18, and the optional ConvLSTM. A
+smoke fit is not a row in the results table below.
+
 Project class edges group IMD sustained-wind bins: [17, 34) D_DD, [34, 48)
 CS, [48, 64) SCS, [64, 91) VSCS, [91, ∞) ESCS_SUCS. They are not a warning
 product. Rows below 17 kt are omitted from classification and kept for
@@ -72,7 +98,8 @@ says so, and a manifest may contain only one averaging period.
 No experiment has been run. Leave this section empty until a real training
 run on real imagery. Files written by `python -m src.baselines` are software
 checks. Smoke rows are marked `synthetic=yes` and `quote_as_result=no`.
-Do not paste those numbers here.
+Do not paste those numbers here. Do not paste a smoke-test loss from
+`cloudie` here either.
 
 ## Limitations
 
@@ -80,8 +107,11 @@ Noisy best-track labels, class imbalance, sensor shift, and weak skill on
 rare intense storms are expected risks, not measured findings. Simplified
 DAV, a single Haar level, and a one-frame delta do not reproduce the
 papers they are drawn from. Southern Hemisphere images are not flipped.
-Monte Carlo dropout is an interface only and is not a calibrated interval.
-This code does not issue warnings.
+Monte Carlo dropout is not a calibrated interval.
+This code does not issue warnings. The Streamlit page still needs a person
+to review any category change, any jump versus the last advisory, any crop
+that fails the missing-pixel gate, and any dropout spread that crosses a
+class boundary.
 
 ## Viva notes
 
@@ -93,3 +123,15 @@ This code does not issue warnings.
 - Why can NASA winds not be labeled with IMD names blindly? Averaging
   periods differ. The column `wind_averaging` has to say which one.
 - What is a smoke MAE? A software check. It is not a result.
+- What is the Monte Carlo dropout standard deviation? It is the spread of
+  stochastic forward passes. It becomes a prediction interval only after a
+  storm-held-out coverage check, which has not been run.
+- Why is 90 knots `VSCS` here when the current IMD sheet starts Extremely
+  Severe at 90 knots? The project edge is the configured value 91 knots,
+  grouping Extremely Severe with Super. The names are not an IMD warning.
+- Why does a smoke checkpoint produce no forecast in the demo? The checkpoint
+  records `is_synthetic` and `present_as_forecast: false`. The page shows
+  that banner and does not call the number a forecast.
+- Why is the size head absent from a smoke run? The smoke manifest has no
+  `r34_nmi` or `rmw_nmi`. The head is a linear map from image features, and
+  best-track wind is not one of those features.

@@ -1,9 +1,34 @@
 # Cloud agent handoff
 
-Phase 0–1 (schema, splits, smoke data, metrics, model interfaces) and
-Phase 2 (features and classical baselines) are in this repository. Continue
-from here. Do not restart from scratch and do not reimplement the baseline
-table.
+Phase 2 lives in `src/`: features and classical baselines. Do not reimplement
+that table and do not restart the package under a new name.
+
+Phases 3–5 live in `cloudie/`. Do not copy them into `src/`. The deep-model
+import root is `cloudie`.
+
+Phase 3 is `cloudie/train.py` and `cloudie/evaluate.py`. Early stopping reads
+`train.patience`. Checkpoints go under `paths.artifacts` and are gitignored.
+The loss is weighted Smooth L1 on wind, with an auxiliary class loss weighted
+by `train.class_loss_weight`. Class weights are fit on the train split only.
+A size term uses `train.size_loss_weight` only when the train split has finite
+`r34_nmi` and `rmw_nmi`. The comparison baseline is the train-set mean.
+`notebooks/smoke_train.ipynb` says the images are synthetic. Do not paste a
+smoke MAE into `docs/PROJECT_DOCUMENTATION.md`. `pretrained: true` still
+refuses to download ImageNet weights unless `CLOUDIE_ALLOW_PRETRAINED=1`.
+
+Phase 4 is `cloudie/predict.py` and `cloudie/app.py`. `present_as_forecast`
+stays false. A missing checkpoint or a failed missing-pixel gate returns no
+number. Smoke checkpoints keep the synthetic banner. `predict.advisory_jump_kt`
+is a review flag, not a warning threshold. Project class names are applied
+only when the checkpoint recorded one `wind_averaging` period. Dropout
+standard deviation is not a calibrated interval.
+
+Phase 5 is `ConvLSTMRegressor` and `cloudie/sequences.py`. `model.name: convlstm`
+uses 4 frames from the same storm and the same split. A previous-frame link
+that leaves the split rejects the window until `null_cross_split_links` clears
+it. The image tensor does not contain wind or size. Southern Hemisphere frames
+are not flipped. The size head is a linear map on image features and is absent
+when the train split has no size labels.
 
 ## Hard constraints
 
@@ -26,33 +51,16 @@ table.
 - Read hyperparameters from `config/config.yaml`.
 - `data.image_size` is for the deep model. Classical features stay at native
   resolution.
+- Do not present Monte Carlo dropout std as a calibrated forecast interval.
+- Do not apply the project class names unless `wind_averaging` is a single
+  recorded period.
 
-## Next issue: Phase 3, deep models
+## Done in Phase 4 and Phase 5
 
-`src/model.py` already defines `SimpleCNN`, `ResNetRegressor`, and
-Monte Carlo dropout. Add `src/train.py` and `src/evaluate.py`:
+- `cloudie/predict.py` and `streamlit run cloudie/app.py`.
+- Optional 4-frame ConvLSTM via `model.name: convlstm`.
+- Size head only after train-split `r34_nmi` and `rmw_nmi` exist. Best-track
+  intensity is not an input to that head.
 
-- train only the training storms, early stopping on validation storms,
-  leave the test split locked
-- one checkpoint per stage, under `artifacts/`, which is gitignored
-- loss is weighted smooth-L1 on wind. A class head is optional and must
-  not become the headline metric
-- repeat a one-channel image to three channels before ResNet-18 so a
-  pretrained `conv1` can be kept. `pretrained=true` downloads weights and
-  must not run in CI
-- report MAE, RMSE, and bias, including inside VSCS and ESCS_SUCS, and
-  compare with the Phase 2 mean and ridge rows from a real run
-- MC-dropout standard deviation is epistemic noise under dropout, not a
-  calibrated interval, until a storm-held-out coverage check says otherwise
-- a Colab notebook may repeat the local script; it must not embed scores
-  from smoke data
-
-## Later, only after Phase 3 tests pass
-
-1. `src/predict.py` and a Streamlit app. If the checkpoint is missing or
-   was fit on smoke data, show a banner and refuse to present the number
-   as a forecast. The app may load a Phase 2 joblib pipeline only after
-   one is saved by an explicit export. Do not treat the smoke CSV as that
-   artifact.
-2. Optional 4-frame ConvLSTM and a size head. Size labels must already
-   exist. Do not feed best-track intensity into that head.
+The training loss is weighted Smooth L1 on wind. A class loss is auxiliary.
+There is no size term until size labels exist on the train split.

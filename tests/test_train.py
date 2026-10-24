@@ -104,6 +104,8 @@ def test_smoke_train_and_evaluate_are_not_a_forecast(tmp_path: Path) -> None:
     assert payload["is_synthetic"] is True
     assert payload["present_as_forecast"] is False
     assert payload["pretrained"] is False
+    assert payload["size_head"] is False
+    assert payload["n_frames"] == 1
     assert payload["norm_source_split"] == "train"
     assert payload["wind_averaging"] == "synthetic"
 

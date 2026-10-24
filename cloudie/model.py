@@ -68,6 +68,75 @@ class ResNetRegressor(nn.Module):
         return self.head(self.encode(inputs))
 
 
+class ConvLSTMCell(nn.Module):
+    """One convolutional LSTM step. Hidden state stays on the image grid."""
+
+    def __init__(self, in_channels: int, hidden: int) -> None:
+        super().__init__()
+        self.hidden = hidden
+        self.gates = nn.Conv2d(in_channels + hidden, 4 * hidden, kernel_size=3, padding=1)
+
+    def forward(
+        self, inputs: torch.Tensor, state: tuple[torch.Tensor, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden, cell = state
+        input_gate, forget_gate, candidate, output_gate = self.gates(
+            torch.cat([inputs, hidden], dim=1)
+        ).chunk(4, dim=1)
+        cell = torch.sigmoid(forget_gate) * cell + torch.sigmoid(input_gate) * torch.tanh(
+            candidate
+        )
+        hidden = torch.sigmoid(output_gate) * torch.tanh(cell)
+        return hidden, cell
+
+
+class ConvLSTMRegressor(nn.Module):
+    """Four-frame ConvLSTM. The tensor is infrared imagery.
+
+    Best-track wind, R34, and radius of maximum wind are not inputs. The
+    training net attaches a size head to ``encode`` only after those labels
+    exist. This module does not flip Southern Hemisphere frames.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        hidden: int = 16,
+        n_frames: int = 4,
+        dropout: float = 0.3,
+    ) -> None:
+        super().__init__()
+        if n_frames != 4:
+            raise ValueError("ConvLSTM uses 4 frames")
+        if hidden < 1:
+            raise ValueError("hidden must be at least 1")
+        self.n_frames = n_frames
+        self.hidden = hidden
+        self.feature_dim = hidden
+        self.cell = ConvLSTMCell(in_channels, hidden)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(hidden, 1))
+
+    def encode(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.ndim != 5:
+            raise ValueError(
+                "ConvLSTM expects (batch, 4, channels, height, width) infrared frames"
+            )
+        if int(inputs.shape[1]) != self.n_frames:
+            raise ValueError(
+                f"ConvLSTM expects {self.n_frames} frames, got {int(inputs.shape[1])}"
+            )
+        batch, _steps, _channels, height, width = inputs.shape
+        hidden = inputs.new_zeros(batch, self.hidden, height, width)
+        cell = inputs.new_zeros(batch, self.hidden, height, width)
+        for step in range(self.n_frames):
+            hidden, cell = self.cell(inputs[:, step], (hidden, cell))
+        return self.pool(hidden).flatten(1)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.head(self.encode(inputs))
+
+
 def enable_mc_dropout(module: nn.Module) -> None:
     """Eval mode for BatchNorm, train mode for Dropout."""
     module.eval()
@@ -84,5 +153,11 @@ def mc_dropout_predict(
     if n_samples < 2:
         raise ValueError("n_samples must be at least 2")
     enable_mc_dropout(module)
-    draws = torch.stack([module(inputs) for _ in range(n_samples)], dim=0)
-    return draws.mean(dim=0), draws.std(dim=0, unbiased=True)
+    draws = []
+    for _ in range(n_samples):
+        output = module(inputs)
+        if isinstance(output, tuple):
+            output = output[0]
+        draws.append(output)
+    stacked = torch.stack(draws, dim=0)
+    return stacked.mean(dim=0), stacked.std(dim=0, unbiased=True)
