@@ -18,14 +18,17 @@ from cloudie.config import load_config
 from cloudie.data_loader import load_manifest
 from cloudie.metrics import mean_baseline, metrics_by_class, regression_metrics
 from cloudie.preprocessing import NormStats
+from cloudie.sequences import stack_windows
 from cloudie.train import (
     CHECKPOINT_NAME,
     NOT_A_FORECAST,
     SMOKE_BANNER,
     build_net,
+    model_n_frames,
     project_labels,
     split_frame,
     stack_split,
+    uses_sequences,
 )
 
 OPERATIONAL_BASELINES = {"ADT": None, "SATCON": None, "Dvorak": None}
@@ -86,7 +89,8 @@ def _predict(model, images: np.ndarray) -> np.ndarray:
     model.eval()
     with torch.no_grad():
         tensor = torch.from_numpy(np.ascontiguousarray(images))
-        wind_hat, _logits = model(tensor)
+        output = model(tensor)
+        wind_hat = output[0] if isinstance(output, tuple) else output
     return wind_hat.detach().cpu().numpy().reshape(-1)
 
 
@@ -116,10 +120,27 @@ def evaluate(config: dict, checkpoint_path: str | Path | None = None) -> Evaluat
         raise ValueError("checkpoint normalization was not fit on train")
     image_size = int(payload["image_size"])
     max_missing = float(payload["max_missing_fraction"])
-    test_images, test_winds, test_labels = stack_split(
-        assigned, manifest, "test", image_size, stats, max_missing
-    )
-    model = build_net(config)
+    if uses_sequences(config):
+        if int(payload.get("n_frames", 1)) != model_n_frames(config):
+            raise ValueError("config model.n_frames does not match the checkpoint")
+        if payload.get("hidden") is not None and int(config["model"].get("hidden", 16)) != int(
+            payload["hidden"]
+        ):
+            raise ValueError("config model.hidden does not match the checkpoint")
+        test_images, test_winds, test_labels, _size = stack_windows(
+            assigned,
+            manifest,
+            "test",
+            image_size,
+            stats,
+            max_missing,
+            model_n_frames(config),
+        )
+    else:
+        test_images, test_winds, test_labels = stack_split(
+            assigned, manifest, "test", image_size, stats, max_missing
+        )
+    model = build_net(config, size_head=bool(payload.get("size_head", False)))
     model.load_state_dict(payload["state_dict"])
     predicted = _predict(model, test_images)
     baseline = mean_baseline([float(payload["mean_baseline_kt"])], len(test_winds))

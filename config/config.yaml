@@ -29,12 +29,21 @@ model:
   pretrained: false
   dropout: 0.3
   mc_samples: 20
+  # Used when model.name is convlstm. The sequence length stays 4.
+  n_frames: 4
+  hidden: 16
 train:
   batch_size: 16
   epochs: 20
   lr: 0.001
   weight_decay: 0.0001
   patience: 5
+  class_loss_weight: 0.1
+  # Applied only when r34_nmi and rmw_nmi exist on the train split.
+  size_loss_weight: 0.1
+predict:
+  # Review flag, not a warning threshold.
+  advisory_jump_kt: 20
 forbidden_features:
   - wind_speed_kt
   - r34_nmi

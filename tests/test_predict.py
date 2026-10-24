@@ -1,0 +1,222 @@
+"""Phase 4. A missing or synthetic checkpoint is not a forecast."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from cloudie.config import load_config
+from cloudie.predict import (
+    format_prediction,
+    missing_checkpoint,
+    predict_images,
+    review_flags,
+)
+from cloudie.preprocessing import leave_unflipped
+
+ROOT = Path(__file__).resolve().parents[1]
+EDGES = (17.0, 34.0, 48.0, 64.0, 91.0)
+NAMES = ("D_DD", "CS", "SCS", "VSCS", "ESCS_SUCS")
+
+
+def _config() -> dict:
+    config = load_config(ROOT / "config" / "config_smoke.yaml")
+    config["data"]["image_size"] = 16
+    config["model"]["mc_samples"] = 2
+    config["model"]["name"] = "simple_cnn"
+    return config
+
+
+def _checkpoint(path: Path, config: dict, **overrides) -> Path:
+    torch = pytest.importorskip("torch")
+    from cloudie.train import build_net
+
+    model = build_net(config, size_head=bool(overrides.get("size_head", False)))
+    payload = {
+        "state_dict": model.state_dict(),
+        "model_name": str(config["model"]["name"]),
+        "dropout": float(config["model"]["dropout"]),
+        "pretrained": False,
+        "in_channels": 1,
+        "n_classes": len(config["data"]["imd5_names"]),
+        "class_names": [str(name) for name in config["data"]["imd5_names"]],
+        "edges_kt": [float(edge) for edge in config["data"]["imd5_edges_kt"]],
+        "norm_mean": 0.0,
+        "norm_std": 1.0,
+        "norm_source_split": "train",
+        "image_size": int(config["data"]["image_size"]),
+        "max_missing_fraction": 0.30,
+        "mean_baseline_kt": 40.0,
+        "is_synthetic": True,
+        "wind_averaging": "synthetic",
+        "n_frames": 1,
+        "size_head": False,
+        "hidden": None,
+        "present_as_forecast": False,
+        "honesty": "not a forecast",
+    }
+    payload.update(overrides)
+    if payload["model_name"] == "convlstm" and payload["hidden"] is None:
+        payload["hidden"] = int(config["model"].get("hidden", 16))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, path)
+    return path
+
+
+def test_missing_checkpoint_has_no_number(tmp_path: Path) -> None:
+    prediction = missing_checkpoint(tmp_path / "missing.pt")
+    text = format_prediction(prediction)
+    assert prediction.show_number is False
+    assert prediction.wind_kt is None
+    assert prediction.present_as_forecast is False
+    assert "no checkpoint" in text.lower()
+    assert "not a forecast" in text.lower()
+    assert "present_as_forecast: false" in text
+    assert not any(line.lower().startswith("forecast") for line in text.splitlines())
+    again = predict_images(_config(), tmp_path / "missing.pt", [np.zeros((8, 8))])
+    assert again.wind_kt is None
+    assert again.present_as_forecast is False
+
+
+def test_review_flags_follow_the_configured_jump_and_withhold_classes() -> None:
+    jump = review_flags(
+        70.0,
+        1.0,
+        50.0,
+        edges=EDGES,
+        names=NAMES,
+        wind_averaging="3-min",
+        advisory_jump_kt=20.0,
+    )
+    assert "jump versus the last advisory" in jump
+    assert "category change" in jump
+    quiet = review_flags(
+        55.0,
+        1.0,
+        50.0,
+        edges=EDGES,
+        names=NAMES,
+        wind_averaging="3-min",
+        advisory_jump_kt=20.0,
+    )
+    assert quiet == ()
+    no_period = review_flags(
+        80.0,
+        1.0,
+        40.0,
+        edges=EDGES,
+        names=NAMES,
+        wind_averaging=None,
+        advisory_jump_kt=20.0,
+    )
+    assert "jump versus the last advisory" in no_period
+    assert "category change" not in no_period
+    spread = review_flags(
+        60.0,
+        40.0,
+        None,
+        edges=EDGES,
+        names=NAMES,
+        wind_averaging="3-min",
+        advisory_jump_kt=20.0,
+    )
+    assert spread == ("dropout spread crosses a project class boundary",)
+    gate = review_flags(
+        None,
+        None,
+        40.0,
+        edges=EDGES,
+        names=NAMES,
+        wind_averaging="3-min",
+        advisory_jump_kt=20.0,
+        failed_gate=True,
+    )
+    assert gate == ("missing-pixel gate",)
+
+
+def test_southern_hemisphere_frame_is_not_flipped() -> None:
+    image = np.arange(16, dtype=np.float32).reshape(4, 4)
+    stored = leave_unflipped(image, "SH")
+    assert np.array_equal(stored, image)
+    assert not np.array_equal(stored, np.fliplr(image))
+
+
+def test_smoke_checkpoint_is_not_a_forecast(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    config = _config()
+    checkpoint = _checkpoint(tmp_path / "checkpoint.pt", config, present_as_forecast=True)
+    image = np.linspace(0, 10, 16 * 16, dtype=np.float32).reshape(16, 16)
+    first = predict_images(config, checkpoint, [image], previous_advisory_kt=30.0)
+    second = predict_images(config, checkpoint, [image], previous_advisory_kt=90.0)
+    assert first.show_number is True
+    assert first.present_as_forecast is False
+    assert first.is_synthetic is True
+    assert first.wind_kt == pytest.approx(second.wind_kt)
+    if first.wind_kt is not None and first.wind_kt >= 17:
+        assert first.project_class is not None
+    else:
+        assert first.project_class is None
+    text = format_prediction(first)
+    assert "do not report" in text.lower()
+    assert "not a forecast" in text.lower()
+    assert "not a calibrated" in text.lower()
+    assert "present_as_forecast: false" in text
+    assert not any(line.lower().startswith("forecast") for line in text.splitlines())
+
+
+def test_missing_pixels_refuse_a_number(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    config = _config()
+    checkpoint = _checkpoint(tmp_path / "checkpoint.pt", config)
+    image = np.full((16, 16), np.nan, dtype=np.float32)
+    image[0, 0] = 1.0
+    prediction = predict_images(config, checkpoint, [image], previous_advisory_kt=40.0)
+    assert prediction.show_number is False
+    assert prediction.wind_kt is None
+    assert prediction.present_as_forecast is False
+    assert prediction.review == ("missing-pixel gate",)
+
+
+def test_class_name_requires_one_wind_averaging_period(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    config = _config()
+    checkpoint = _checkpoint(tmp_path / "checkpoint.pt", config, wind_averaging=None)
+    image = np.ones((16, 16), dtype=np.float32)
+    prediction = predict_images(config, checkpoint, [image], previous_advisory_kt=10.0)
+    assert prediction.project_class is None
+    assert "category change" not in prediction.review
+
+
+def test_wrong_frame_count_has_no_number(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    config = _config()
+    checkpoint = _checkpoint(tmp_path / "checkpoint.pt", config, n_frames=4, model_name="simple_cnn")
+    # model_name in the payload must still match the config, so a 4-frame
+    # simple_cnn checkpoint is only a count check before the forward pass.
+    image = np.ones((16, 16), dtype=np.float32)
+    prediction = predict_images(config, checkpoint, [image])
+    assert prediction.show_number is False
+    assert prediction.wind_kt is None
+    assert "4" in prediction.banner
+    assert "not a forecast" in prediction.banner.lower()
+
+
+def test_app_module_imports_without_streamlit_side_effects() -> None:
+    import cloudie.app as app
+
+    assert "not a forecast" in app.REVIEW_NOTE.lower() or "reviews" in app.REVIEW_NOTE.lower()
+
+
+def test_streamlit_page_refuses_a_missing_checkpoint() -> None:
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    page = AppTest.from_file(str(ROOT / "cloudie" / "app.py"), default_timeout=30)
+    page.run()
+    visible = " ".join(getattr(item, "value", "") for item in page.error)
+    assert "no checkpoint" in visible.lower()
+    assert "not a forecast" in visible.lower()
+    labels = [getattr(item, "label", "") for item in page.metric]
+    assert "Forecast" not in labels

@@ -1,4 +1,6 @@
 -r requirements.txt
 torch>=2.1
 torchvision>=0.16
+matplotlib>=3.7
 h5py>=3.9
+streamlit>=1.33
