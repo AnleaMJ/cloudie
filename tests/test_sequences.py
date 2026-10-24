@@ -206,8 +206,16 @@ def test_convlstm_checkpoint_needs_four_frames(tmp_path: Path) -> None:
     import torch
 
     model = build_net(config, size_head=False)
+    state = model.state_dict()
+    for key, value in state.items():
+        if str(key).endswith("bias") and value.ndim == 1 and value.numel() == 1:
+            value.fill_(50.0)
+            weight = str(key)[: -len("bias")] + "weight"
+            if weight in state:
+                state[weight].zero_()
+            break
     payload = {
-        "state_dict": model.state_dict(),
+        "state_dict": state,
         "model_name": "convlstm",
         "dropout": float(config["model"]["dropout"]),
         "pretrained": False,

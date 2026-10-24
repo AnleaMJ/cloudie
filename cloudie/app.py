@@ -18,7 +18,11 @@ from cloudie.predict import Prediction, category_span
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGE_LEAD = "Predict cyclone wind speed and intensity category from an infrared image."
-CONFIDENCE_NOTE = "Confidence is the share of model samples in this intensity category."
+CONFIDENCE_NOTE = "Confidence is the share of model samples in this intensity category, inside 0–200 kt."
+SCALE_NOTE = (
+    "Reported winds stay between 0 and 200 kt: below depression, depression, "
+    "cyclonic storm, severe, very severe, and extremely severe or super cyclonic storm."
+)
 
 
 def read_upload(upload) -> np.ndarray:
@@ -97,6 +101,7 @@ def main() -> None:
     st.set_page_config(page_title="Cloudie", layout="wide")
     st.title("Cloudie")
     st.header(PAGE_LEAD)
+    st.caption(SCALE_NOTE)
 
     with st.sidebar:
         st.header("Checkpoint")

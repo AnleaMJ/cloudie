@@ -150,34 +150,49 @@ def category_span(
     return f"{lower:.0f} kt and above"
 
 
+# A reported wind stays inside this span unless config sets another one.
+# Samples outside it do not count as confidence in a category.
+DEFAULT_PLAUSIBLE_KT = (0.0, 200.0)
+# Image mean must sit within this many training standard deviations.
+TRAINING_MEAN_WIDTH = 3.0
+
+
 def category_confidence(
     winds,
     category: str | None,
     edges: tuple[float, ...],
     names: tuple[str, ...],
-) -> tuple[float, dict[str, float]]:
-    """Share of wind samples that fall in ``category``.
+    *,
+    low: float = DEFAULT_PLAUSIBLE_KT[0],
+    high: float = DEFAULT_PLAUSIBLE_KT[1],
+) -> tuple[float, dict[str, float], float]:
+    """Share of samples in ``category`` and inside ``low``–``high`` knots.
 
-    ``category`` is the project bin of the reported wind, so the score
-    belongs to the same intensity label as the knots. Keys are the project
-    class codes. Samples below the first edge are omitted from those keys;
-    their share is ``1 - sum(table)``.
+    A sample outside that span is not evidence for any category, including
+    the top bin. ``below`` is the share that is inside the span and under
+    the first category edge.
     """
     values = np.asarray(winds, dtype=np.float64).reshape(-1)
     if values.size == 0 or not np.isfinite(values).all():
         raise ValueError("wind samples did not produce a probability")
+    if high <= low:
+        raise ValueError("plausible wind span is empty")
     table = {name: 0.0 for name in names}
+    below = 0.0
+    support = 0.0
     for value in values:
+        if float(value) < low or float(value) > high:
+            continue
         label = wind_to_imd5(float(value), edges, names)
-        if label in table:
+        if label is None:
+            below += 1.0
+        elif label in table:
             table[label] += 1.0
+        if label == category or (category is None and label is None):
+            support += 1.0
     total = float(values.size)
     table = {name: count / total for name, count in table.items()}
-    if category in table:
-        score = table[category]
-    else:
-        score = float(1.0 - sum(table.values()))
-    return float(score), table
+    return support / total, table, below / total
 
 
 def _banner(payload: dict) -> str:
@@ -225,6 +240,48 @@ def _wind_samples(model, model_input, n_samples: int, seed: int) -> tuple[float,
     finally:
         model.eval()
         torch.set_rng_state(state)
+
+
+def _plausible_kt(config: dict) -> tuple[float, float]:
+    raw = config.get("data", {}).get("plausible_wind_kt", DEFAULT_PLAUSIBLE_KT)
+    low, high = float(raw[0]), float(raw[1])
+    if high <= low:
+        raise ValueError("data.plausible_wind_kt must be a rising span")
+    return low, high
+
+
+def _field_mean(images: list[np.ndarray]) -> float:
+    finite = [
+        np.asarray(image, dtype=np.float64)[np.isfinite(image)] for image in images
+    ]
+    finite = [values for values in finite if values.size]
+    if not finite:
+        raise ValueError("image has no finite pixels")
+    return float(np.concatenate(finite).mean())
+
+
+def _outside_training_values(field_mean: float, norm_mean: float, norm_std: float) -> bool:
+    scale = max(float(norm_std), 1e-6)
+    return abs(float(field_mean) - float(norm_mean)) > TRAINING_MEAN_WIDTH * scale
+
+
+def _scale_banner(low: float, high: float, *, outside_training: bool) -> str:
+    span = (
+        f"Reported winds stay between {low:.0f} and {high:.0f} kt: "
+        "below depression, depression, cyclonic storm, severe, very severe, "
+        "and extremely severe or super cyclonic storm."
+    )
+    if outside_training:
+        reason = (
+            "This infrared frame is outside the values the checkpoint was trained on. "
+            "No wind speed or confidence is reported."
+        )
+    else:
+        reason = (
+            "The model wind is outside that range. "
+            "No wind speed or confidence is reported."
+        )
+    return f"{reason} {span}"
 
 
 def _advisory_jump_kt(config: dict) -> float:
@@ -327,17 +384,27 @@ def predict_images(
     model = build_net(config, size_head=size_head)
     model.load_state_dict(payload["state_dict"])
     seed = int(config.get("project", {}).get("seed", 0))
+    low_kt, high_kt = _plausible_kt(config)
     wind_kt, samples = _wind_samples(model, model_input, _mc_samples(config), seed)
     edges = _edges(payload, config)
     names = _names(payload, config)
     averaging = payload.get("wind_averaging")
     averaging = None if averaging in (None, "") else str(averaging)
+    outside_training = _outside_training_values(
+        _field_mean(images), float(payload["norm_mean"]), float(payload["norm_std"])
+    )
+    if outside_training or not (low_kt <= wind_kt <= high_kt):
+        return _refusal(
+            _scale_banner(low_kt, high_kt, outside_training=outside_training),
+            is_synthetic=synthetic,
+        )
     # The category is the project bin of the predicted wind, so the knots
     # and the intensity label describe the same number.
     project_class = wind_to_imd5(wind_kt, edges, names)
-    confidence, table = category_confidence(samples, project_class, edges, names)
+    confidence, table, below = category_confidence(
+        samples, project_class, edges, names, low=low_kt, high=high_kt
+    )
     probability_rows = tuple((intensity_label(name), table[name]) for name in names)
-    below = float(1.0 - sum(table.values()))
     if project_class is None or below > 1e-8:
         probability_rows = ((BELOW_CATEGORY, below), *probability_rows)
     return Prediction(
