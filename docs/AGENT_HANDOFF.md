@@ -16,12 +16,13 @@ A size term uses `train.size_loss_weight` only when the train split has finite
 smoke MAE into `docs/PROJECT_DOCUMENTATION.md`. `pretrained: true` still
 refuses to download ImageNet weights unless `CLOUDIE_ALLOW_PRETRAINED=1`.
 
-Phase 4 is `cloudie/predict.py` and `cloudie/app.py`. `present_as_forecast`
+Phase 4 is `cloudie/predict.py` and `cloudie/app.py`. The page reports wind
+speed in knots, the project intensity category of that wind, and the share
+of model samples in that category (`model.mc_samples`). `present_as_forecast`
 stays false. A missing checkpoint or a failed missing-pixel gate returns no
 number. Smoke checkpoints keep the synthetic banner. `predict.advisory_jump_kt`
-is a review flag, not a warning threshold. Project class names are applied
-only when the checkpoint recorded one `wind_averaging` period. Dropout
-standard deviation is not a calibrated interval.
+is a review flag, not a warning threshold. Dropout standard deviation is not
+the displayed score and is not a calibrated interval.
 
 Phase 5 is `ConvLSTMRegressor` and `cloudie/sequences.py`. `model.name: convlstm`
 uses 4 frames from the same storm and the same split. A previous-frame link

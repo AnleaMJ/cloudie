@@ -27,7 +27,7 @@ model:
   name: simple_cnn
   pretrained: false
   dropout: 0.3
-  mc_samples: 4
+  mc_samples: 20
   n_frames: 4
   hidden: 8
 train:

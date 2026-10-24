@@ -40,8 +40,9 @@ ImageNet download. Southern Hemisphere frames are not flipped.
 
 `cloudie/predict.py` and the Streamlit page read a checkpoint.
 `present_as_forecast` stays false. A missing file or a failed missing-pixel
-gate produces no number. A jump versus a last advisory, a project-class
-change, and a dropout spread that crosses a class edge are review notes.
+gate produces no number. The page reports wind speed in knots, the intensity
+category of that wind, and the share of model samples in that category.
+A jump versus a last advisory and a project-class change are review notes.
 The dropout standard deviation is not a calibrated interval.
 
 Normalization statistics for the deep path fit on train only. Classical
@@ -109,9 +110,8 @@ DAV, a single Haar level, and a one-frame delta do not reproduce the
 papers they are drawn from. Southern Hemisphere images are not flipped.
 Monte Carlo dropout is not a calibrated interval.
 This code does not issue warnings. The Streamlit page still needs a person
-to review any category change, any jump versus the last advisory, any crop
-that fails the missing-pixel gate, and any dropout spread that crosses a
-class boundary.
+to review any category change, any jump versus the last advisory, and any
+crop that fails the missing-pixel gate.
 
 ## Viva notes
 
