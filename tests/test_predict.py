@@ -84,21 +84,42 @@ def test_missing_checkpoint_has_no_number(tmp_path: Path) -> None:
 
 def test_confidence_is_the_share_of_samples_in_the_predicted_category() -> None:
     winds = [40.0, 42.0, 44.0, 55.0]
-    confidence, table = category_confidence(winds, "CS", EDGES, NAMES)
+    confidence, table, below = category_confidence(winds, "CS", EDGES, NAMES)
+    assert below == pytest.approx(0.0)
     assert sum(table.values()) == pytest.approx(1.0)
     assert table["CS"] == pytest.approx(0.75)
     assert table["SCS"] == pytest.approx(0.25)
     assert confidence == pytest.approx(0.75)
     below_winds = [5.0, 8.0, 10.0, 40.0]
-    below, below_table = category_confidence(below_winds, None, EDGES, NAMES)
+    below, below_table, below_share = category_confidence(below_winds, None, EDGES, NAMES)
     assert below == pytest.approx(0.75)
+    assert below_share == pytest.approx(0.75)
     assert below == pytest.approx(1.0 - sum(below_table.values()))
+    impossible = [40.0, 42.0, 1600.0, 1800.0]
+    score, extreme, _ = category_confidence(impossible, "CS", EDGES, NAMES)
+    assert score == pytest.approx(0.5)
+    assert extreme["ESCS_SUCS"] == pytest.approx(0.0)
+    assert extreme["CS"] == pytest.approx(0.5)
     assert intensity_label("VSCS") == "Very Severe Cyclonic Storm"
     assert intensity_label(None) == "Below depression"
     with pytest.raises(ValueError, match="wind samples"):
         category_confidence([np.nan], "CS", EDGES, NAMES)
     with pytest.raises(ValueError, match="wind samples"):
         category_confidence([], "CS", EDGES, NAMES)
+
+
+def _force_wind(state: dict, knots: float) -> None:
+    for key, value in state.items():
+        if not str(key).endswith("bias") or value.ndim != 1 or value.numel() != 1:
+            continue
+        if "class_head" in str(key) or "size_head" in str(key):
+            continue
+        value.fill_(float(knots))
+        weight = str(key)[: -len("bias")] + "weight"
+        if weight in state:
+            state[weight].zero_()
+        return
+    raise AssertionError("wind head not found")
 
 
 def test_review_flags_follow_the_configured_jump_and_withhold_classes() -> None:
@@ -168,7 +189,11 @@ def test_smoke_checkpoint_is_not_a_forecast(tmp_path: Path) -> None:
     pytest.importorskip("torch")
     config = _config()
     checkpoint = _checkpoint(tmp_path / "checkpoint.pt", config, present_as_forecast=True)
-    image = np.linspace(0, 10, 16 * 16, dtype=np.float32).reshape(16, 16)
+    torch = pytest.importorskip("torch")
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    _force_wind(payload["state_dict"], 40.0)
+    torch.save(payload, checkpoint)
+    image = np.zeros((16, 16), dtype=np.float32)
     first = predict_images(config, checkpoint, [image], previous_advisory_kt=30.0)
     second = predict_images(config, checkpoint, [image], previous_advisory_kt=90.0)
     assert first.show_number is True
@@ -204,14 +229,55 @@ def test_missing_pixels_refuse_a_number(tmp_path: Path) -> None:
 
 
 def test_category_follows_predicted_wind_without_an_averaging_period(tmp_path: Path) -> None:
-    pytest.importorskip("torch")
+    torch = pytest.importorskip("torch")
     config = _config()
     checkpoint = _checkpoint(tmp_path / "checkpoint.pt", config, wind_averaging=None)
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    _force_wind(payload["state_dict"], 40.0)
+    torch.save(payload, checkpoint)
     image = np.ones((16, 16), dtype=np.float32)
     prediction = predict_images(config, checkpoint, [image], previous_advisory_kt=10.0)
     assert prediction.category_label
     assert prediction.confidence is not None
     assert "category change" not in prediction.review
+
+
+def test_display_counts_outside_training_have_no_wind(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    config = _config()
+    checkpoint = _checkpoint(tmp_path / "checkpoint.pt", config)
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    _force_wind(payload["state_dict"], 40.0)
+    torch.save(payload, checkpoint)
+    image = np.full((16, 16), 80.0, dtype=np.float32)
+    prediction = predict_images(config, checkpoint, [image])
+    text = format_prediction(prediction)
+    assert prediction.show_number is False
+    assert prediction.wind_kt is None
+    assert prediction.confidence is None
+    assert "1600" not in text
+    assert "80" not in text.split("Reported")[0]
+    assert "0" in text and "200" in text
+    assert "super cyclonic" in text.lower()
+    assert "trained on" in text.lower()
+
+
+def test_wind_above_200_kt_has_no_number(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    config = _config()
+    checkpoint = _checkpoint(tmp_path / "checkpoint.pt", config)
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    _force_wind(payload["state_dict"], 1644.7)
+    torch.save(payload, checkpoint)
+    image = np.zeros((16, 16), dtype=np.float32)
+    prediction = predict_images(config, checkpoint, [image])
+    text = format_prediction(prediction)
+    assert prediction.show_number is False
+    assert prediction.wind_kt is None
+    assert prediction.confidence is None
+    assert "1644" not in text
+    assert "200" in text
+    assert "super cyclonic" in text.lower()
 
 
 def test_wrong_frame_count_has_no_number(tmp_path: Path) -> None:
