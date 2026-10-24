@@ -1,9 +1,11 @@
 """Model output for one image, or four frames.
 
-A missing checkpoint produces no number. A smoke checkpoint is a software
-check. Neither is a forecast. Dropout standard deviation is not a calibrated
-prediction interval. Project class names are applied only when the checkpoint
-recorded one wind-averaging period.
+The reported number is wind speed in knots. The intensity category is the
+project bin of that wind. Confidence is the share of stochastic forward
+passes that fall in the same bin. A missing checkpoint produces no number.
+A smoke checkpoint is a software check. Neither is a forecast. Dropout
+standard deviation is not the displayed score and is not a calibrated
+prediction interval.
 """
 
 from __future__ import annotations
@@ -25,7 +27,16 @@ MISSING_PIXEL_BANNER = (
     "This crop failed the missing-pixel gate. There is no model output. "
     "A person reviews a failed crop. This is not a forecast."
 )
-NOT_CALIBRATED = "Dropout standard deviation is not a calibrated prediction interval."
+
+# Display names for the project bins. The code names stay on the checkpoint.
+CATEGORY_LABELS = {
+    "D_DD": "Depression / Deep Depression",
+    "CS": "Cyclonic Storm",
+    "SCS": "Severe Cyclonic Storm",
+    "VSCS": "Very Severe Cyclonic Storm",
+    "ESCS_SUCS": "Extremely Severe / Super Cyclonic Storm",
+}
+BELOW_CATEGORY = "Below depression"
 
 
 @dataclass(frozen=True)
@@ -38,6 +49,9 @@ class Prediction:
     banner: str
     review: tuple[str, ...]
     is_synthetic: bool
+    confidence: float | None = None
+    category_label: str | None = None
+    class_probabilities: tuple[tuple[str, float], ...] = ()
 
 
 def missing_checkpoint(path: str | Path) -> Prediction:
@@ -116,6 +130,56 @@ def _load_checkpoint(path: Path) -> dict:
         return torch.load(path, map_location="cpu")
 
 
+def intensity_label(project_class: str | None) -> str:
+    """Human-readable intensity category for a project class code."""
+    if project_class is None:
+        return BELOW_CATEGORY
+    return CATEGORY_LABELS.get(project_class, project_class)
+
+
+def category_span(
+    project_class: str | None, edges: tuple[float, ...], names: tuple[str, ...]
+) -> str:
+    """Knot range for the category the predicted wind fell in."""
+    if project_class is None:
+        return f"under {edges[0]:.0f} kt"
+    index = names.index(project_class)
+    lower = edges[index]
+    if index + 1 < len(edges):
+        return f"{lower:.0f}–{edges[index + 1]:.0f} kt"
+    return f"{lower:.0f} kt and above"
+
+
+def category_confidence(
+    winds,
+    category: str | None,
+    edges: tuple[float, ...],
+    names: tuple[str, ...],
+) -> tuple[float, dict[str, float]]:
+    """Share of wind samples that fall in ``category``.
+
+    ``category`` is the project bin of the reported wind, so the score
+    belongs to the same intensity label as the knots. Keys are the project
+    class codes. Samples below the first edge are omitted from those keys;
+    their share is ``1 - sum(table)``.
+    """
+    values = np.asarray(winds, dtype=np.float64).reshape(-1)
+    if values.size == 0 or not np.isfinite(values).all():
+        raise ValueError("wind samples did not produce a probability")
+    table = {name: 0.0 for name in names}
+    for value in values:
+        label = wind_to_imd5(float(value), edges, names)
+        if label in table:
+            table[label] += 1.0
+    total = float(values.size)
+    table = {name: count / total for name, count in table.items()}
+    if category in table:
+        score = table[category]
+    else:
+        score = float(1.0 - sum(table.values()))
+    return float(score), table
+
+
 def _banner(payload: dict) -> str:
     if bool(payload.get("is_synthetic")):
         return (
@@ -123,6 +187,44 @@ def _banner(payload: dict) -> str:
             + " The number is a software check. It is not a forecast."
         )
     return str(payload.get("honesty") or NOT_A_FORECAST)
+
+
+def _mc_samples(config: dict) -> int:
+    count = int(config["model"].get("mc_samples", 20))
+    if count < 1:
+        raise ValueError("model.mc_samples must be at least 1")
+    return count
+
+
+def _wind_value(output) -> float:
+    wind = output[0] if isinstance(output, tuple) else output
+    return float(wind.detach().cpu().reshape(-1)[0])
+
+
+def _wind_samples(model, model_input, n_samples: int, seed: int) -> tuple[float, np.ndarray]:
+    """Point wind with dropout off, then seeded samples with dropout on.
+
+    The point wind is the reported speed. The samples are only the
+    confidence estimate. The global RNG is restored before returning.
+    """
+    import torch
+
+    from cloudie.model import enable_mc_dropout
+
+    state = torch.get_rng_state()
+    try:
+        model.eval()
+        with torch.no_grad():
+            point = _wind_value(model(model_input))
+            if n_samples == 1:
+                return point, np.asarray([point], dtype=np.float64)
+            enable_mc_dropout(model)
+            torch.manual_seed(int(seed))
+            draws = [_wind_value(model(model_input)) for _ in range(n_samples)]
+        return point, np.asarray(draws, dtype=np.float64)
+    finally:
+        model.eval()
+        torch.set_rng_state(state)
 
 
 def _advisory_jump_kt(config: dict) -> float:
@@ -142,24 +244,6 @@ def _names(payload: dict, config: dict) -> tuple[str, ...]:
     return tuple(str(name) for name in raw)
 
 
-def _dropout_std(model, tensor, n_samples: int) -> float:
-    import torch
-
-    from cloudie.model import enable_mc_dropout
-
-    if n_samples < 2:
-        raise ValueError("n_samples must be at least 2")
-    enable_mc_dropout(model)
-    draws = []
-    with torch.no_grad():
-        for _ in range(n_samples):
-            output = model(tensor)
-            wind = output[0] if isinstance(output, tuple) else output
-            draws.append(wind.reshape(-1))
-    stacked = torch.stack(draws, dim=0)
-    return float(stacked.std(dim=0, unbiased=True).reshape(-1)[0])
-
-
 def predict_images(
     config: dict,
     checkpoint_path: str | Path,
@@ -167,7 +251,6 @@ def predict_images(
     *,
     previous_advisory_kt: float | None = None,
     hemisphere: str | None = None,
-    n_samples: int | None = None,
 ) -> Prediction:
     """Run the checkpoint. ``previous_advisory_kt`` is a review input only."""
     path = Path(checkpoint_path)
@@ -243,30 +326,30 @@ def predict_images(
     size_head = bool(payload.get("size_head", False))
     model = build_net(config, size_head=size_head)
     model.load_state_dict(payload["state_dict"])
-    model.eval()
-    with torch.no_grad():
-        output = model(model_input)
-        wind_hat = output[0] if isinstance(output, tuple) else output
-        wind_kt = float(wind_hat.detach().cpu().reshape(-1)[0])
-    samples = int(
-        config["model"].get("mc_samples", 20) if n_samples is None else n_samples
-    )
-    dropout_std = _dropout_std(model, model_input, samples)
+    seed = int(config.get("project", {}).get("seed", 0))
+    wind_kt, samples = _wind_samples(model, model_input, _mc_samples(config), seed)
     edges = _edges(payload, config)
     names = _names(payload, config)
     averaging = payload.get("wind_averaging")
     averaging = None if averaging in (None, "") else str(averaging)
-    project_class = wind_to_imd5(wind_kt, edges, names) if averaging else None
+    # The category is the project bin of the predicted wind, so the knots
+    # and the intensity label describe the same number.
+    project_class = wind_to_imd5(wind_kt, edges, names)
+    confidence, table = category_confidence(samples, project_class, edges, names)
+    probability_rows = tuple((intensity_label(name), table[name]) for name in names)
+    below = float(1.0 - sum(table.values()))
+    if project_class is None or below > 1e-8:
+        probability_rows = ((BELOW_CATEGORY, below), *probability_rows)
     return Prediction(
         wind_kt=wind_kt,
-        dropout_std_kt=dropout_std,
+        dropout_std_kt=None,
         project_class=project_class,
         present_as_forecast=False,
         show_number=True,
         banner=_banner(payload),
         review=review_flags(
             wind_kt,
-            dropout_std,
+            None,
             previous_advisory_kt,
             edges=edges,
             names=names,
@@ -274,27 +357,30 @@ def predict_images(
             advisory_jump_kt=jump,
         ),
         is_synthetic=synthetic,
+        confidence=confidence,
+        category_label=intensity_label(project_class),
+        class_probabilities=probability_rows,
     )
 
 
 def format_prediction(prediction: Prediction) -> str:
-    """Text for the CLI. The heading is never a forecast label."""
+    """Text for the CLI. Wind, intensity category, and category confidence."""
+    if not prediction.show_number or prediction.wind_kt is None:
+        return "\n".join(
+            [
+                prediction.banner,
+                "present_as_forecast: false",
+            ]
+        )
     lines = [
-        prediction.banner,
-        "present_as_forecast: false",
-        NOT_CALIBRATED,
+        f"wind speed (kt): {prediction.wind_kt:.2f}",
+        f"intensity category: {prediction.category_label}",
     ]
-    if prediction.show_number and prediction.wind_kt is not None:
-        lines.append(f"model output (kt): {prediction.wind_kt:.2f}")
-        lines.append("This number is not a forecast.")
-        if prediction.dropout_std_kt is not None:
-            lines.append(f"dropout std (kt): {prediction.dropout_std_kt:.2f}")
-        if prediction.project_class is not None:
-            lines.append(
-                f"project class: {prediction.project_class}. Not an IMD warning."
-            )
+    if prediction.confidence is not None:
+        lines.append(f"confidence: {prediction.confidence * 100:.0f}%")
+    if prediction.is_synthetic:
+        lines.append(prediction.banner)
     if prediction.review:
-        lines.append("A person needs to review this output.")
         lines.extend(f"review: {item}" for item in prediction.review)
     return "\n".join(lines)
 

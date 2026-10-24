@@ -1,7 +1,9 @@
-"""Streamlit demo. Smoke output and a missing checkpoint are not forecasts.
+"""Streamlit demo for cyclone wind speed and intensity category.
 
-Run with ``streamlit run cloudie/app.py``. The page does not download imagery
-and does not write a score into the project documentation.
+Run with ``streamlit run cloudie/app.py``. The page reads a trained
+checkpoint and reports knots, the intensity category of that wind, and
+the share of model samples in that category. It does not write a score
+into the project documentation.
 """
 
 from __future__ import annotations
@@ -9,15 +11,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
-from cloudie.predict import NOT_CALIBRATED, Prediction
+from cloudie.predict import Prediction, category_span
 
 ROOT = Path(__file__).resolve().parents[1]
-REVIEW_NOTE = (
-    "A person reviews any category change, any jump versus the last advisory, "
-    "any crop that fails the missing-pixel gate, and any dropout spread that "
-    "crosses a class boundary."
-)
+PAGE_LEAD = "Predict cyclone wind speed and intensity category from an infrared image."
+CONFIDENCE_NOTE = "Confidence is the share of model samples in this intensity category."
 
 
 def read_upload(upload) -> np.ndarray:
@@ -33,27 +33,57 @@ def read_upload(upload) -> np.ndarray:
     return np.asarray(Image.open(io.BytesIO(data)), dtype=np.float32)
 
 
-def render_prediction(prediction: Prediction) -> None:
-    """Draw a model output. The heading is not a forecast label."""
+def example_frames(root: Path = ROOT) -> list[Path]:
+    """Synthetic frames on disk, when a local smoke set exists."""
+    image_dir = root / "data" / "smoke" / "images"
+    if not image_dir.is_dir():
+        return []
+    return sorted(path for path in image_dir.glob("*.npy") if path.is_file())
+
+
+def render_prediction(
+    prediction: Prediction,
+    edges: tuple[float, ...] | None = None,
+    names: tuple[str, ...] | None = None,
+) -> None:
+    """Draw wind speed, intensity category, and category confidence."""
     import streamlit as st
 
-    if prediction.is_synthetic or not prediction.show_number:
+    if not prediction.show_number or prediction.wind_kt is None:
         st.error(prediction.banner)
-    else:
-        st.warning(prediction.banner)
-    st.caption("present_as_forecast: false")
-    st.caption(NOT_CALIBRATED)
-    if prediction.show_number and prediction.wind_kt is not None:
-        st.metric("Model output (kt)", f"{prediction.wind_kt:.1f}")
-        st.caption("This number is not a forecast.")
-        if prediction.project_class is not None:
-            st.write(f"Project class: {prediction.project_class}. Not an IMD warning.")
-        if prediction.dropout_std_kt is not None:
-            st.write(f"Dropout standard deviation: {prediction.dropout_std_kt:.1f} kt.")
+        return
+    percent = (
+        "—"
+        if prediction.confidence is None
+        else f"{prediction.confidence * 100:.0f}%"
+    )
+    st.subheader(f"{prediction.wind_kt:.1f} kt · {prediction.category_label} · {percent}")
+    wind, category, confidence = st.columns(3)
+    wind.metric("Wind speed", f"{prediction.wind_kt:.1f} kt")
+    category.metric("Intensity category", prediction.category_label or "—")
+    confidence.metric("Confidence", percent)
+    if edges is not None and names is not None:
+        st.caption(
+            f"{prediction.category_label} covers "
+            f"{category_span(prediction.project_class, edges, names)}."
+        )
+    st.caption(CONFIDENCE_NOTE)
+    if prediction.confidence is not None:
+        st.progress(min(1.0, max(0.0, float(prediction.confidence))))
+    if prediction.class_probabilities:
+        chart = pd.DataFrame(
+            {
+                "Category": [label for label, _prob in prediction.class_probabilities],
+                "Confidence": [prob for _label, prob in prediction.class_probabilities],
+            }
+        ).set_index("Category")
+        st.bar_chart(chart, horizontal=True)
+    if prediction.is_synthetic:
+        st.caption(prediction.banner)
     if prediction.review:
-        st.warning("A person needs to review this output.")
-        for item in prediction.review:
-            st.write(f"- {item}")
+        with st.expander("Review notes"):
+            for item in prediction.review:
+                st.write(item)
 
 
 def main() -> None:
@@ -61,50 +91,70 @@ def main() -> None:
 
     from cloudie.config import load_config
     from cloudie.predict import missing_checkpoint, predict_images
+    from cloudie.schema import DEFAULT_EDGES_KT, DEFAULT_NAMES
 
-    st.set_page_config(page_title="Cloudie", layout="centered")
+    st.set_page_config(page_title="Cloudie", layout="wide")
     st.title("Cloudie")
-    st.caption("Not a forecast or a warning system.")
-    st.markdown(REVIEW_NOTE)
+    st.header(PAGE_LEAD)
 
-    config_path = st.text_input("Config", value=str(ROOT / "config" / "config.yaml"))
-    checkpoint_text = st.text_input(
-        "Checkpoint", value=str(ROOT / "artifacts" / "checkpoint.pt")
-    )
-    previous_text = st.text_input("Last advisory wind (kt)", value="")
-    uploads = st.file_uploader(
-        "Infrared frames",
-        type=["npy", "png", "jpg", "jpeg", "tif", "tiff"],
-        accept_multiple_files=True,
-        help="One file for a single-frame checkpoint. Four files, named in time order, for the ConvLSTM.",
-    )
+    with st.sidebar:
+        st.header("Checkpoint")
+        config_path = st.text_input("Config", value=str(ROOT / "config" / "config.yaml"))
+        checkpoint_text = st.text_input(
+            "Trained weights", value=str(ROOT / "artifacts" / "checkpoint.pt")
+        )
+        previous_text = st.text_input("Last advisory wind (kt)", value="")
+        st.caption("Optional. Used only to flag a jump or a category change.")
+        st.caption(
+            "A smoke check uses config/config_smoke.yaml and "
+            "artifacts/smoke/checkpoint.pt."
+        )
+
     checkpoint = Path(checkpoint_text)
     if not checkpoint.is_file():
         render_prediction(missing_checkpoint(checkpoint))
+        st.info("Train a checkpoint, then point Trained weights at the .pt file.")
         return
-    st.warning(
-        "A loaded checkpoint is still not a forecast. A smoke checkpoint is a software check."
+
+    examples = example_frames()
+    example_name = "(none)"
+    if examples:
+        example_name = st.selectbox(
+            "Example infrared frame",
+            options=["(none)", *[path.name for path in examples]],
+            help="Local synthetic frames. An upload replaces the example.",
+        )
+    uploads = st.file_uploader(
+        "Infrared image",
+        type=["npy", "png", "jpg", "jpeg", "tif", "tiff"],
+        accept_multiple_files=True,
+        help="One infrared frame. Four frames, named in time order, when the checkpoint is the ConvLSTM.",
     )
-    if not uploads:
-        st.info("Add a frame to compute a model output.")
+    has_example = example_name not in (None, "(none)")
+    if not uploads and not has_example:
+        st.info("Add an infrared frame, then predict intensity.")
         return
-    if not st.button("Run model"):
+    if not st.button("Predict intensity", type="primary"):
         return
     try:
         config = load_config(config_path)
     except (OSError, ValueError) as exc:
-        st.error(f"Could not read the config. This is not a forecast. {exc}")
+        st.error(f"Could not read the config. {exc}")
         return
     previous = None
     if previous_text.strip():
         try:
             previous = float(previous_text)
         except ValueError:
-            st.error("Last advisory wind must be a number of knots. This is not a forecast.")
+            st.error("Last advisory wind must be a number of knots.")
             return
-    ordered = sorted(uploads, key=lambda item: item.name)
     try:
-        images = [read_upload(item) for item in ordered]
+        if uploads:
+            ordered = sorted(uploads, key=lambda item: item.name)
+            images = [read_upload(item) for item in ordered]
+        else:
+            chosen = next(path for path in examples if path.name == example_name)
+            images = [np.load(chosen)]
         prediction = predict_images(
             config,
             checkpoint,
@@ -112,9 +162,14 @@ def main() -> None:
             previous_advisory_kt=previous,
         )
     except (OSError, ValueError) as exc:
-        st.error(f"{exc} This is not a forecast.")
+        st.error(str(exc))
         return
-    render_prediction(prediction)
+    edges = tuple(float(edge) for edge in config["data"]["imd5_edges_kt"])
+    names = tuple(str(name) for name in config["data"]["imd5_names"])
+    if not edges:
+        edges = DEFAULT_EDGES_KT
+        names = DEFAULT_NAMES
+    render_prediction(prediction, edges, names)
 
 
 if __name__ == "__main__":

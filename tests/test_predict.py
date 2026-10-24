@@ -9,7 +9,9 @@ import pytest
 
 from cloudie.config import load_config
 from cloudie.predict import (
+    category_confidence,
     format_prediction,
+    intensity_label,
     missing_checkpoint,
     predict_images,
     review_flags,
@@ -78,6 +80,25 @@ def test_missing_checkpoint_has_no_number(tmp_path: Path) -> None:
     again = predict_images(_config(), tmp_path / "missing.pt", [np.zeros((8, 8))])
     assert again.wind_kt is None
     assert again.present_as_forecast is False
+
+
+def test_confidence_is_the_share_of_samples_in_the_predicted_category() -> None:
+    winds = [40.0, 42.0, 44.0, 55.0]
+    confidence, table = category_confidence(winds, "CS", EDGES, NAMES)
+    assert sum(table.values()) == pytest.approx(1.0)
+    assert table["CS"] == pytest.approx(0.75)
+    assert table["SCS"] == pytest.approx(0.25)
+    assert confidence == pytest.approx(0.75)
+    below_winds = [5.0, 8.0, 10.0, 40.0]
+    below, below_table = category_confidence(below_winds, None, EDGES, NAMES)
+    assert below == pytest.approx(0.75)
+    assert below == pytest.approx(1.0 - sum(below_table.values()))
+    assert intensity_label("VSCS") == "Very Severe Cyclonic Storm"
+    assert intensity_label(None) == "Below depression"
+    with pytest.raises(ValueError, match="wind samples"):
+        category_confidence([np.nan], "CS", EDGES, NAMES)
+    with pytest.raises(ValueError, match="wind samples"):
+        category_confidence([], "CS", EDGES, NAMES)
 
 
 def test_review_flags_follow_the_configured_jump_and_withhold_classes() -> None:
@@ -154,15 +175,18 @@ def test_smoke_checkpoint_is_not_a_forecast(tmp_path: Path) -> None:
     assert first.present_as_forecast is False
     assert first.is_synthetic is True
     assert first.wind_kt == pytest.approx(second.wind_kt)
-    if first.wind_kt is not None and first.wind_kt >= 17:
-        assert first.project_class is not None
-    else:
-        assert first.project_class is None
+    assert first.confidence == pytest.approx(second.confidence)
+    assert first.category_label
+    assert first.confidence is not None
+    assert 0.0 <= first.confidence <= 1.0
+    matched = dict(first.class_probabilities)
+    assert matched[first.category_label] == pytest.approx(first.confidence)
+    assert sum(prob for _label, prob in first.class_probabilities) == pytest.approx(1.0)
     text = format_prediction(first)
+    assert "wind speed (kt):" in text
+    assert "intensity category:" in text
+    assert "confidence:" in text
     assert "do not report" in text.lower()
-    assert "not a forecast" in text.lower()
-    assert "not a calibrated" in text.lower()
-    assert "present_as_forecast: false" in text
     assert not any(line.lower().startswith("forecast") for line in text.splitlines())
 
 
@@ -179,13 +203,14 @@ def test_missing_pixels_refuse_a_number(tmp_path: Path) -> None:
     assert prediction.review == ("missing-pixel gate",)
 
 
-def test_class_name_requires_one_wind_averaging_period(tmp_path: Path) -> None:
+def test_category_follows_predicted_wind_without_an_averaging_period(tmp_path: Path) -> None:
     pytest.importorskip("torch")
     config = _config()
     checkpoint = _checkpoint(tmp_path / "checkpoint.pt", config, wind_averaging=None)
     image = np.ones((16, 16), dtype=np.float32)
     prediction = predict_images(config, checkpoint, [image], previous_advisory_kt=10.0)
-    assert prediction.project_class is None
+    assert prediction.category_label
+    assert prediction.confidence is not None
     assert "category change" not in prediction.review
 
 
@@ -206,7 +231,8 @@ def test_wrong_frame_count_has_no_number(tmp_path: Path) -> None:
 def test_app_module_imports_without_streamlit_side_effects() -> None:
     import cloudie.app as app
 
-    assert "not a forecast" in app.REVIEW_NOTE.lower() or "reviews" in app.REVIEW_NOTE.lower()
+    assert "wind speed" in app.PAGE_LEAD.lower()
+    assert "intensity category" in app.PAGE_LEAD.lower()
 
 
 def test_streamlit_page_refuses_a_missing_checkpoint() -> None:
