@@ -1,0 +1,4 @@
+-r requirements.txt
+torch>=2.1
+torchvision>=0.16
+h5py>=3.9

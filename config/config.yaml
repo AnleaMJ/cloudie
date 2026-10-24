@@ -1,0 +1,77 @@
+project:
+  name: cyclone-intensity-estimation
+  seed: 42
+  honesty: >
+    No trained weights are shipped. Smoke images are synthetic.
+    This is not an operational forecast or warning system.
+paths:
+  manifest: data/manifest.csv
+  artifacts: artifacts
+  reports: reports
+data:
+  # Deep models resize to this. Classical features keep native resolution.
+  image_size: 128
+  channels: 1
+  normalize: zscore
+  max_missing_fraction: 0.30
+  plausible_wind_kt: [0, 200]
+  imd5_edges_kt: [17, 34, 48, 64, 91]
+  imd5_names: [D_DD, CS, SCS, VSCS, ESCS_SUCS]
+split:
+  strategy: storm_wise
+  test_fraction: 0.2
+  val_fraction: 0.2
+  holdout_years: []
+  holdout_basin: null
+  seed: 42
+model:
+  name: simple_cnn
+  pretrained: false
+  dropout: 0.3
+  mc_samples: 20
+train:
+  batch_size: 16
+  epochs: 20
+  lr: 0.001
+  weight_decay: 0.0001
+  patience: 5
+forbidden_features:
+  - wind_speed_kt
+  - r34_nmi
+  - rmw_nmi
+  - imd5_class
+  - intensity_bin
+features:
+  # Name distributional stats tb_* only when a calibration table was applied.
+  calibrated: false
+  cold_thresholds: [200, 210, 220, 230, 240]
+  radial_bins: 8
+  eye_radius_fraction: 0.12
+  cdo_outer_fraction: 0.35
+  eye_contrast_min: 2.0
+  dav_radii_fractions: [0.15, 0.30, 0.45, 0.60]
+  dav_annulus_width_fraction: 0.08
+  glcm_levels: 16
+  glcm_distance: 1
+  selection:
+    correlation_threshold: 0.95
+    max_features: 25
+    method: correlation_rf
+    n_estimators: 80
+    seed: 42
+baselines:
+  n_splits: 3
+  seed: 42
+  regression_models: [mean, ridge, knn, svr, rf, xgboost]
+  classification_models: [most_frequent, logreg, knn, svc, rf, xgboost]
+  use_smote: true
+  ridge_alpha: 1.0
+  knn_neighbors: 5
+  svr_c: 1.0
+  svc_c: 1.0
+  rf_estimators: 200
+  rf_max_depth: 6
+  xgb_estimators: 80
+  xgb_max_depth: 3
+  xgb_learning_rate: 0.1
+  max_iter: 1000
