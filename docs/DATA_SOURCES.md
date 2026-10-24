@@ -14,6 +14,9 @@ Do not commit imagery or best-track dumps. CI must not download them.
   first channel only.
 - IBTrACS v4: https://doi.org/10.25921/82ty-9e16. Labels only.
 - INSAT-3D / 3DR: MOSDAC, registration required, not redistributed here.
+  The Streamlit button reads the public Infrared-1 JPEG on
+  https://mausam.imd.gov.in/responsive/satellite.php when someone clicks
+  it. That file is not committed, and tests do not download it.
 - TC PRIMED: https://doi.org/10.25921/dmy1-0595. Optional later source.
 
 Wind averaging period must be a column. Do not mix 1-minute and 10-minute

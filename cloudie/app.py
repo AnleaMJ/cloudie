@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from cloudie.imd_satellite import IMD_BUTTON, describe_frame, fetch_current_infrared
 from cloudie.predict import Prediction, category_span
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,6 +117,8 @@ def main() -> None:
         st.info("Train a checkpoint, then point Trained weights at the .pt file.")
         return
 
+    pull = st.button(IMD_BUTTON, type="primary")
+    st.caption("Latest Infrared-1 image from the IMD satellite page.")
     examples = example_frames()
     example_name = "(none)"
     if examples:
@@ -130,12 +133,9 @@ def main() -> None:
         accept_multiple_files=True,
         help="One infrared frame. Four frames, named in time order, when the checkpoint is the ConvLSTM.",
     )
+    predict_clicked = st.button("Predict intensity")
     has_example = example_name not in (None, "(none)")
-    if not uploads and not has_example:
-        st.info("Add an infrared frame, then predict intensity.")
-        return
-    if not st.button("Predict intensity", type="primary"):
-        return
+
     try:
         config = load_config(config_path)
     except (OSError, ValueError) as exc:
@@ -148,6 +148,39 @@ def main() -> None:
         except ValueError:
             st.error("Last advisory wind must be a number of knots.")
             return
+    edges = tuple(float(edge) for edge in config["data"]["imd5_edges_kt"])
+    names = tuple(str(name) for name in config["data"]["imd5_names"])
+    if not edges:
+        edges = DEFAULT_EDGES_KT
+        names = DEFAULT_NAMES
+
+    if pull:
+        try:
+            with st.spinner("Pulling the current IMD satellite image"):
+                frame = fetch_current_infrared()
+            picture, result = st.columns([1, 1])
+            with picture:
+                st.image(frame.preview, use_container_width=True)
+                st.caption(describe_frame(frame))
+                st.caption(frame.source_url)
+            with result:
+                prediction = predict_images(
+                    config,
+                    checkpoint,
+                    [frame.image],
+                    previous_advisory_kt=previous,
+                )
+                render_prediction(prediction, edges, names)
+        except (OSError, ValueError) as exc:
+            st.error(str(exc))
+        return
+
+    if not predict_clicked:
+        st.info("Pull the current IMD satellite image, or add an infrared frame.")
+        return
+    if not uploads and not has_example:
+        st.error("Add an infrared frame, then predict intensity.")
+        return
     try:
         if uploads:
             ordered = sorted(uploads, key=lambda item: item.name)
@@ -164,11 +197,6 @@ def main() -> None:
     except (OSError, ValueError) as exc:
         st.error(str(exc))
         return
-    edges = tuple(float(edge) for edge in config["data"]["imd5_edges_kt"])
-    names = tuple(str(name) for name in config["data"]["imd5_names"])
-    if not edges:
-        edges = DEFAULT_EDGES_KT
-        names = DEFAULT_NAMES
     render_prediction(prediction, edges, names)
 
 
