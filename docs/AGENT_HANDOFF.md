@@ -23,7 +23,9 @@ of model samples in that category (`model.mc_samples`). The button
 `cloudie/imd_satellite.py` at request time and does not store it. Tests
 pass a response in and must not download that JPEG. `present_as_forecast`
 stays false. A missing checkpoint or a failed missing-pixel gate returns no
-number. Smoke checkpoints keep the synthetic banner. `predict.advisory_jump_kt`
+number. A frame outside the checkpoint's infrared values, or a wind outside
+`data.plausible_wind_kt` (0–200), returns no number and no confidence.
+Smoke checkpoints keep the synthetic banner. `predict.advisory_jump_kt`
 is a review flag, not a warning threshold. Dropout standard deviation is not
 the displayed score and is not a calibrated interval.
 

@@ -44,7 +44,9 @@ gate produces no number. The page reports wind speed in knots, the intensity
 category of that wind, and the share of model samples in that category.
 Pull current status from IMD reads the public Infrared-1 JPEG at request
 time and does not store it.
-A jump versus a last advisory and a project-class change are review notes.
+A frame outside the checkpoint's infrared values, or a wind outside
+0–200 kt, produces no number and no confidence. A jump versus a last
+advisory and a project-class change are review notes.
 The dropout standard deviation is not a calibrated interval.
 
 Normalization statistics for the deep path fit on train only. Classical
