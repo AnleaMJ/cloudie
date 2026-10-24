@@ -1,9 +1,10 @@
-.PHONY: test smoke train-smoke
+.PHONY: test smoke baselines
+
 test:
 	pytest
+
 smoke:
-	python -m cloudie.make_smoke_data --out data/smoke
-train-smoke:
-	python -m cloudie.make_smoke_data --out data/smoke
-	python -m cloudie.train --config config/config_smoke.yaml
-	python -m cloudie.evaluate --config config/config_smoke.yaml
+	python -m src.make_smoke_data --out data/smoke --profile balanced
+
+baselines: smoke
+	python -m src.baselines --config config/config_smoke.yaml

@@ -2,53 +2,94 @@
 
 ## Abstract
 
-Cloudie is a leak-free pipeline for tropical-cyclone intensity regression from single-channel infrared imagery. The target is maximum sustained wind in knots. A 5-class project label exists for stratified metrics. No experiment has been run in this repository. No performance number from the literature survey is a result of Cloudie.
+A leak-free pipeline for tropical-cyclone intensity regression from infrared
+imagery. Classical feature baselines are implemented so a later neural net
+has something honest to beat. No experiment has been run. No performance
+number in the literature survey is a result of this repository.
 
 ## Methodology
 
-Phase 0–1 implements the split and schema controls below. Phase 3 adds a training loop and an evaluation report. It does not implement feature baselines or a demo app. A smoke fit is not a result.
+Outer splits are storm-wise, year-block, or basin-holdout. A storm is never
+cut. The test side of that split is locked: feature selection, SMOTE, and
+model fits see training storms only, and the comparison score is computed
+on validation storms.
 
-- Splits are `storm_wise`, `chronological` (a year block), or `holdout_basin`. Random frame splits raise `LeakageError`. A storm that crosses a year or basin boundary is not cut.
-- Mean and standard deviation for normalization are fit on the train split only.
-- Previous-frame links that leave the row's split are removed before any later temporal feature can see them.
-- Primary-model inputs exclude `wind_speed_kt`, `r34_nmi`, `rmw_nmi`, `imd5_class`, and `intensity_bin`.
-- The training loop reads `config/config.yaml`. It stops after `train.patience` validation checks without an improvement, writes a checkpoint under `artifacts/`, and compares the test split with the train-set mean. The wind loss is weighted Smooth L1. An auxiliary class loss uses weights fit on the train split only. There is no size term.
-- Model interfaces: a train-set mean baseline, `SimpleCNN`, and ResNet-18 with a one-channel image repeated to three channels so a pretrained first convolution can be kept. Monte Carlo dropout puts BatchNorm in eval and Dropout in train. `pretrained: true` is refused unless a local environment variable allows the ImageNet download.
+Inner comparison uses `StratifiedGroupKFold` on training storms, stratified
+by the project class and grouped by `storm_id`. SMOTE, when enabled, runs
+inside the current training fold and only for classification. Regression
+uses the training labels as they are. Class weights are the fallback when
+SMOTE is off or a fold is too small for it, except for k-nearest neighbors,
+which has no class-weight parameter.
 
-## Project classes
+Normalization statistics for the deep path fit on train only. Classical
+features are computed on the native image, not on a z-scored tensor, so
+cold thresholds stay in image units. Set `features.calibrated` only after a
+real calibration table has been applied. The names then switch from
+`pixel_*` to `tb_*`. This code does not look up a sensor calibration.
 
-Configured edges in knots: `[17, 34)`, `[34, 48)`, `[48, 64)`, `[64, 91)`, and `[91, ∞)`, named `D_DD`, `CS`, `SCS`, `VSCS`, and `ESCS_SUCS`.
+Images are assumed pre-centered. Best-track latitude and longitude are not
+used to crop, and best-track intensity is not a feature.
 
-They group India Meteorological Department categories (Depression with Deep Depression, and Extremely Severe with Super). They are a metric label. The July 2024 IMD 3-minute sheet (Cyclone Warning Division SOP) places Very Severe at 64–89 knots and Extremely Severe at 90–119 knots. This config places 90 knots in `VSCS`. Do not stamp the names on a wind column whose averaging period is unrecorded.
+## Feature dictionary
 
-## Survey gaps this scaffold addresses
-
-| Gap | Control in this repo | Status |
+| Feature | What it is | Survey link |
 | --- | --- | --- |
-| Random frame splits leak near-duplicate images | `LeakageError` on random, frame, or shuffle strategies | Implemented, tested on smoke data |
-| Best-track intensity used as an input | `forbidden_features` | Listed and rejected as a design rule; no feature builder yet |
-| No uncertainty estimate | `mc_dropout_predict` | Interface only. The std is not a calibrated interval |
-| Single-basin claims | `holdout_basin` | Split exists. No cross-basin score |
-| Extreme-intensity error hidden by a single MAE | `metrics_by_class` | Function exists. The results table below stays empty |
-| No training loop | `cloudie/train.py` | Runs on smoke data as a software check. No real-data score |
-| Little use of storm history | `null_cross_split_links` | Links cannot cross a split. ConvLSTM is not implemented |
+| `pixel_*` or `tb_*` | Min, max, mean, std, percentiles, interquartile range on finite pixels | Phase-2 mini-project brightness-temperature statistics. `tb_` is used only when the array is already calibrated. |
+| `cold_frac_*` | Fraction of finite pixels below each configured threshold | Cold-cloud coverage from that mini-project. Thresholds are image units, not a hidden Kelvin scale. |
+| `radial_mean_*` | Mean in equal-width annuli from the crop center | Radial structure. Wrong if the storm is not near the center. |
+| `eye_center_mean`, `cdo_annulus_mean`, `eye_cdo_contrast`, `eye_present` | Warm center minus the surrounding annulus. The flag is contrast at or above `eye_contrast_min`. | A warm-eye versus central-dense-overcast cue. Not an eye bulletin. A cold core is not marked as an eye. |
+| `dav_simplified_r*` | Circular variance of (gradient angle minus radial angle) at fixed fractions of the crop half-width. The ring is at least two pixels thick. Pixels with no gradient are ignored, because a zero gradient has no direction. | The survey's DAV work, implemented as a simplified gradient-angle variance. Not operational DAV: no radius search and no flight-level wind. |
+| `glcm_*` | Contrast, dissimilarity, homogeneity, energy, correlation, and ASM, averaged over four angles at one distance | Grey-level texture. Levels and distance come from config. |
+| `haar_energy_*` | Share of energy in the four single-level Haar bands | The survey's wavelet paper, reduced to one Haar level on one channel. Not a multichannel fusion model. |
+| `has_prev`, `delta_*` | Change versus the previous frame of the same storm after cross-split links are removed. Missing history stays missing and is imputed inside the training fold. | Addresses the limited use of storm history. The link cannot cross train, val, and test. |
+
+Wind speed, R34, RMW, and the class label are forbidden as inputs. That is
+the operational hole called out for best-track-dependent models in the
+survey, including the DeepTCNet setting. Stratifying a split on the label
+is allowed. Feeding the label back in is not.
+
+## Models
+
+Regression: training-mean predictor, ridge, k-nearest neighbors, RBF SVR,
+random forest, and XGBoost when the package imports. Classification of the
+five project classes: most-frequent training class, logistic regression,
+k-nearest neighbors, RBF SVC, random forest, and XGBoost. Inputs are
+median-imputed and standardized inside the training fold.
+
+The comparison table reports MAE, RMSE, and bias (prediction minus label),
+the same MAE inside each project class, and macro-F1 with per-class recall.
+Accuracy is not the headline. ADT, SATCON, and Dvorak columns are present
+and empty.
+
+Project class edges group IMD sustained-wind bins: [17, 34) D_DD, [34, 48)
+CS, [48, 64) SCS, [64, 91) VSCS, [91, ∞) ESCS_SUCS. They are not a warning
+product. Rows below 17 kt are omitted from classification and kept for
+regression. Names are not applied to 1-minute winds unless `wind_averaging`
+says so, and a manifest may contain only one averaging period.
 
 ## Results
 
-Leave this section empty until a training run on real labeled imagery. Do not paste a smoke-test loss here. Do not copy RMSE or MAE from papers into this file.
-
-| Run | Split | MAE (kt) | RMSE (kt) | Bias (kt) | Notes |
-| --- | --- | --- | --- | --- | --- |
-| | | | | | |
+No experiment has been run. Leave this section empty until a real training
+run on real imagery. Files written by `python -m src.baselines` are software
+checks. Smoke rows are marked `synthetic=yes` and `quote_as_result=no`.
+Do not paste those numbers here.
 
 ## Limitations
 
-Best-track labels are noisy. Class imbalance, sensor shift, and weak skill on rare intense storms are expected risks. They are not measured findings. Cloudie does not issue warnings. A later service, if one is built, still needs a person to review any category change, any jump versus the last advisory, any crop that fails the missing-pixel gate, and any interval that crosses a class boundary.
+Noisy best-track labels, class imbalance, sensor shift, and weak skill on
+rare intense storms are expected risks, not measured findings. Simplified
+DAV, a single Haar level, and a one-frame delta do not reproduce the
+papers they are drawn from. Southern Hemisphere images are not flipped.
+Monte Carlo dropout is an interface only and is not a calibrated interval.
+This code does not issue warnings.
 
 ## Viva notes
 
-- Why refuse a random split? Adjacent frames of one storm are near-duplicates, so a frame split leaks the answer into the test set.
-- Why is intensity not an input? At real time it is the quantity being estimated. Feeding the best-track wind back in is leakage.
-- What is the Monte Carlo dropout standard deviation? It is the spread of stochastic forward passes. It becomes a prediction interval only after a storm-held-out coverage check, which has not been run.
-- Why can NASA winds not be labeled with these class names blindly? Averaging periods differ. `wind_averaging` has to name the period, and a manifest with two periods is rejected.
-- Why is 90 knots `VSCS` here when the current IMD sheet starts Extremely Severe at 90 knots? The project edge is the configured value 91 knots, grouping Extremely Severe with Super. The names are not an IMD warning.
+- Why not a random split? Adjacent frames of one storm are near-duplicates.
+- Why is intensity not an input? It is unavailable, or leakage, in real time.
+- Why is SMOTE inside the fold? Synthetic rows must not be built from
+  validation or test storms.
+- What is simplified DAV not? It is not the operational radius-search product.
+- Why can NASA winds not be labeled with IMD names blindly? Averaging
+  periods differ. The column `wind_averaging` has to say which one.
+- What is a smoke MAE? A software check. It is not a result.
