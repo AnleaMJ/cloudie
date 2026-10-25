@@ -9,6 +9,9 @@ from PIL import Image
 
 from cloudie.splits import LeakageError
 
+# A missing-pixel fraction above this value fails closed. It does not warn.
+MAX_MISSING_FRACTION = 0.30
+
 
 @dataclass(frozen=True)
 class NormStats:
@@ -63,9 +66,13 @@ def prepare_image(
     image: np.ndarray,
     image_size: int,
     stats: NormStats | None,
-    max_missing_fraction: float = 0.30,
+    max_missing_fraction: float = MAX_MISSING_FRACTION,
 ) -> np.ndarray:
-    """Return ``(C, H, W)`` float32. Does not invent brightness temperature."""
+    """Return ``(C, H, W)`` float32. Does not invent brightness temperature.
+
+    A missing-pixel fraction above ``max_missing_fraction`` raises. Raw
+    digital numbers stay pixel values; this function does not name them Tb.
+    """
     array = as_channel_first(image)
     fraction = missing_fraction(array)
     if fraction > max_missing_fraction:

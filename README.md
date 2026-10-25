@@ -31,9 +31,10 @@ the train split. No score in this repository is a scientific result.
 Leak-free splits and quality gates (Phase 0–1), then classical baselines
 (Phase 2, under `src/`):
 
-- pixel or brightness-temperature stats, cold-pixel fractions, a radial
-  profile, a warm-eye flag, simplified deviation-angle variance, GLCM,
-  single-level Haar energy, and a same-storm temporal delta
+- pixel stats (brightness-temperature names only after a calibration table),
+  cold-pixel fractions, a radial profile, a warm-eye flag, simplified
+  deviation-angle variance, GLCM, single-level Haar energy, and a
+  same-storm temporal delta
 - feature selection fit on the training storms only
 - mean, ridge, k-nearest neighbors, RBF SVM, random forest, and XGBoost
   when it is installed, for wind regression and for the five project classes
@@ -108,12 +109,13 @@ split except train. Wind speed, R34, and RMW are labels, not inputs.
 native crop and assume the storm is already near the center. This code
 does not recenter with a best-track fix.
 
-Project class names group India Meteorological Department categories for
-metrics: `[17, 34)` `D_DD`, `[34, 48)` `CS`, `[48, 64)` `SCS`, `[64, 91)`
+Project class names are this project's own grouping, not official IMD classes:
+`[17, 34)` `D_DD`, `[34, 48)` `CS`, `[48, 64)` `SCS`, `[64, 91)`
 `VSCS`, and `91` and above `ESCS_SUCS`. The July 2024 IMD 3-minute sheet
-starts Extremely Severe at 90 knots, so 90 knots is `VSCS` here. These names
-are not a warning, and they do not transfer onto 1-minute winds unless
-`wind_averaging` records the period.
+starts Extremely Severe at 90 knots, so 90 knots is `VSCS` under this
+project's 91 kt edge. These names are not a warning. They are applied only
+when `wind_averaging` records one period for the manifest, such as `1-min`,
+`3-min`, or `10-min`. Mixed periods are rejected.
 
 ## Failure modes
 

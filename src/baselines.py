@@ -36,7 +36,7 @@ from src.data_loader import load_manifest
 from src.features import FeatureSpec, extract_feature_table, model_matrix, select_features
 from src.metrics import classification_metrics, metrics_by_class, regression_metrics
 from src.plots import save_confusion_matrix, save_feature_importance, save_regression_scatter
-from src.schema import DEFAULT_NAMES, FORBIDDEN_FEATURES
+from src.schema import DEFAULT_NAMES, FORBIDDEN_FEATURES, parse_is_synthetic
 from src.splits import LeakageError, assert_no_group_leakage, assign_storms
 
 logger = logging.getLogger(__name__)
@@ -361,17 +361,20 @@ def fit_numeric_pipeline(
 
 
 def _synthetic_flag(frame: pd.DataFrame) -> str:
+    """Track synthetic rows. A missing column is unknown, never a silent no.
+
+    Ambiguous values raise. They are not coerced to real observations.
+    """
     if "is_synthetic" not in frame.columns:
         return "unknown"
-    values = frame["is_synthetic"].dropna()
-    if values.empty:
+    flags = [parse_is_synthetic(value) for value in frame["is_synthetic"].tolist()]
+    if not flags:
         return "unknown"
-    flags = values.astype(bool)
-    if bool(flags.all()):
+    if all(flags):
         return "yes"
-    if not bool(flags.any()):
-        return "no"
-    return "mixed"
+    if any(flags):
+        return "mixed"
+    return "no"
 
 
 def _empty_metric_row(task: str, model: str, note: str, synthetic: str, n_features: int) -> dict:

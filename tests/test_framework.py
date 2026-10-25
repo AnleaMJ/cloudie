@@ -38,6 +38,7 @@ def test_mixed_wind_averaging_is_rejected() -> None:
             "storm_id": ["s1", "s2"],
             "wind_speed_kt": [40, 50],
             "wind_averaging": ["1-min", "10-min"],
+            "is_synthetic": [False, False],
         }
     )
     with pytest.raises(SchemaError, match="wind_averaging"):
