@@ -28,8 +28,13 @@ from sklearn.impute import SimpleImputer
 
 from src.data_loader import load_image, resolve_image
 from src.preprocessing import as_channel_first, missing_fraction
-from src.schema import FORBIDDEN_FEATURES, wind_to_imd5
-from src.splits import LeakageError, add_previous_frame_id, null_cross_split_links
+from src.schema import wind_to_imd5
+from src.splits import (
+    LeakageError,
+    add_previous_frame_id,
+    assert_no_forbidden_inputs,
+    null_cross_split_links,
+)
 
 GLCM_NAMES = (
     "glcm_contrast",
@@ -519,17 +524,13 @@ def extract_feature_table(
         built.update(temporal)
         rows.append(built)
     table = pd.DataFrame(rows)
-    banned = set(spec.feature_names()) & set(FORBIDDEN_FEATURES)
-    if banned:
-        raise LeakageError(f"feature names include labels: {sorted(banned)}")
+    assert_no_forbidden_inputs(spec.feature_names(), "feature names include labels")
     return table, dropped
 
 
 def model_matrix(frame: pd.DataFrame, names: tuple[str, ...] | list[str]) -> np.ndarray:
     """Numeric feature matrix. Raises if a label column is requested."""
-    banned = set(names) & set(FORBIDDEN_FEATURES)
-    if banned:
-        raise LeakageError(f"forbidden features in model matrix: {sorted(banned)}")
+    assert_no_forbidden_inputs(names, "forbidden features in model matrix")
     missing = [name for name in names if name not in frame.columns]
     if missing:
         raise KeyError(f"missing feature columns: {missing}")
@@ -568,9 +569,7 @@ def select_features(
                 f"selection frame splits were {sorted(present)}, expected train"
             )
     names = tuple(feature_names)
-    banned = set(names) & set(FORBIDDEN_FEATURES)
-    if banned:
-        raise LeakageError(f"forbidden features in selection: {sorted(banned)}")
+    assert_no_forbidden_inputs(names, "forbidden features in selection")
     if len(frame) < 5:
         raise ValueError("feature selection needs at least 5 training rows")
     if len(target) != len(frame):
