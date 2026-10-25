@@ -3,9 +3,10 @@
 The main path is TorchGeo ``TropicalCyclone`` (Maskey et al. 2020,
 https://doi.org/10.1109/JSTARS.2020.3011907). TorchGeo checks the files and
 reads ``{training,test}_set_{features,labels}.csv``; images sit at
-``<root>/<split>/<Image ID>.jpg``. Download with
-``TropicalCyclone(root, split, download=True)``, which needs ``azcopy`` and
-pulls from the public Source Cooperative blob. The Hugging Face repo
+``<root>/<split>/<Image ID>.jpg``. A one-time download is
+``TropicalCyclone(root, split, download=True)`` from the public Source
+Cooperative blob. The copy tool and the mirror are named in
+``docs/DATA_SOURCES.md``. The Hugging Face repo
 ``torchgeo/tropical_cyclone`` is only a mirror. CI never downloads either.
 
 Images keep their native size. Nothing in this module resizes. Most frames
@@ -68,10 +69,12 @@ def torchgeo_tables(root: str | Path, split: str) -> tuple[pd.DataFrame, pd.Data
     """Return TorchGeo's features and labels frames for one competition side.
 
     Imports TorchGeo lazily so tests and the web app do not need it.
+    ``download`` stays false: this reader never fetches imagery.
     """
-    from torchgeo.datasets import TropicalCyclone
+    import importlib
 
-    dataset = TropicalCyclone(root=str(root), split=split, download=False)
+    tropical = importlib.import_module("torchgeo.datasets")
+    dataset = tropical.TropicalCyclone(root=str(root), split=split, download=False)
     return dataset.features, dataset.labels
 
 

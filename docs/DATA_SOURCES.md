@@ -8,7 +8,9 @@ Do not commit imagery or best-track dumps. CI must not download them.
   in `config/config.yaml`). Download uses azcopy. Do not download in CI.
   Cite https://doi.org/10.1109/JSTARS.2020.3011907.
   The Hugging Face mirror `torchgeo/tropical_cyclone` lists CC-BY-4.0 and
-  about 2.4 GB. It is a mirror only. The main loader is TorchGeo
+  about 2.4 GB. Do not depend on the Hub viewer in CI. A local copy can
+  be turned into a manifest later; this phase does not ship a downloader.
+  It is a mirror only. The main loader is TorchGeo
   `TropicalCyclone`: `python -m src.nasa_tc --root data/torchgeo_tc`
   builds `data/nasa_tc/manifest.csv` from TorchGeo's CSVs and
   `<root>/<split>/<Image ID>.jpg`. Download once with
