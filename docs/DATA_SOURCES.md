@@ -24,7 +24,8 @@ Do not commit imagery or best-track dumps. CI must not download them.
 `wind_averaging` must be a column on every manifest, for example `1-min`,
 `3-min`, or `10-min`. Mixed periods in one manifest are rejected. The
 17/34/48/64/91 kt names are this project's grouping, not official IMD classes,
-and they are not a warning product.
+and they are not a warning product. IMD itself uses 3-minute winds, so those
+bins are not the IMD 3-minute scale.
 
 `center_source` may be `dataset_precentered` or a fix available at image
 time. Do not crop with a best-track center revised after the image time.
