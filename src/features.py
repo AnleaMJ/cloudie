@@ -14,6 +14,10 @@ center. This module does not recenter with a best-track fix.
 
 Temporal deltas use the previous frame of the same storm after cross-split
 links have been removed. Wind, R34, RMW, and class labels are not features.
+
+Crop height and width are the array shape. ``data.image_size`` is the deep
+model's resize and is not applied here. Feature selection calls
+``storm_ids_by_split`` and fits only the training storms.
 """
 
 from __future__ import annotations
@@ -29,7 +33,13 @@ from sklearn.impute import SimpleImputer
 from src.data_loader import load_image, resolve_image
 from src.preprocessing import MAX_MISSING_FRACTION, as_channel_first, missing_fraction
 from src.schema import FORBIDDEN_FEATURES, parse_is_synthetic, wind_to_imd5
-from src.splits import LeakageError, add_previous_frame_id, null_cross_split_links
+from src.splits import (
+    LeakageError,
+    add_previous_frame_id,
+    assert_no_forbidden_inputs,
+    null_cross_split_links,
+    storm_ids_by_split,
+)
 
 GLCM_NAMES = (
     "glcm_contrast",
@@ -111,41 +121,65 @@ class FeatureSpec:
             glcm_distance=int(raw.get("glcm_distance", 1)),
         )
 
-    def image_feature_names(self) -> tuple[str, ...]:
+    def feature_groups(self) -> dict[str, tuple[str, ...]]:
+        """Feature names by group.
+
+        ``pixel_stats`` are order statistics of the stored image values.
+        They are not brightness temperature unless ``calibrated`` is set,
+        in which case the same slots use the ``tb_`` prefix.
+        ``dav_simplified`` is gradient-angle variance, not operational DAV.
+        """
         prefix = self.prefix
-        names = [
-            f"{prefix}_min",
-            f"{prefix}_max",
-            f"{prefix}_mean",
-            f"{prefix}_std",
-            f"{prefix}_p10",
-            f"{prefix}_p25",
-            f"{prefix}_p50",
-            f"{prefix}_p75",
-            f"{prefix}_p90",
-            f"{prefix}_iqr",
-        ]
-        names.extend(f"cold_frac_{_token(threshold)}" for threshold in self.cold_thresholds)
-        names.extend(f"radial_mean_{index:02d}" for index in range(self.radial_bins))
-        names.extend(EYE_NAMES)
-        names.extend(
-            f"dav_simplified_r{index:02d}" for index in range(len(self.dav_radii_fractions))
-        )
-        names.extend(GLCM_NAMES)
-        names.extend(HAAR_NAMES)
+        return {
+            "pixel_stats": (
+                f"{prefix}_min",
+                f"{prefix}_max",
+                f"{prefix}_mean",
+                f"{prefix}_std",
+                f"{prefix}_p10",
+                f"{prefix}_p25",
+                f"{prefix}_p50",
+                f"{prefix}_p75",
+                f"{prefix}_p90",
+                f"{prefix}_iqr",
+            ),
+            "cold_cloud": tuple(
+                f"cold_frac_{_token(threshold)}" for threshold in self.cold_thresholds
+            ),
+            "radial": tuple(f"radial_mean_{index:02d}" for index in range(self.radial_bins)),
+            "eye_cdo": EYE_NAMES,
+            "dav_simplified": tuple(
+                f"dav_simplified_r{index:02d}" for index in range(len(self.dav_radii_fractions))
+            ),
+            "glcm": GLCM_NAMES,
+            "haar": HAAR_NAMES,
+            "temporal": (
+                "has_prev",
+                f"delta_{prefix}_mean",
+                f"delta_{prefix}_min",
+                "delta_cold_primary",
+                "delta_eye_cdo_contrast",
+                "delta_radial_mean_00",
+            ),
+        }
+
+    def image_feature_names(self) -> tuple[str, ...]:
+        groups = self.feature_groups()
+        names: list[str] = []
+        for key in (
+            "pixel_stats",
+            "cold_cloud",
+            "radial",
+            "eye_cdo",
+            "dav_simplified",
+            "glcm",
+            "haar",
+        ):
+            names.extend(groups[key])
         return tuple(names)
 
     def feature_names(self) -> tuple[str, ...]:
-        prefix = self.prefix
-        temporal = (
-            "has_prev",
-            f"delta_{prefix}_mean",
-            f"delta_{prefix}_min",
-            "delta_cold_primary",
-            "delta_eye_cdo_contrast",
-            "delta_radial_mean_00",
-        )
-        return self.image_feature_names() + temporal
+        return self.image_feature_names() + self.feature_groups()["temporal"]
 
 
 @dataclass(frozen=True)
@@ -155,6 +189,7 @@ class FeatureSelection:
     importances: dict[str, float]
     dropped_variance: tuple[str, ...]
     dropped_correlation: tuple[str, ...]
+    train_storms: frozenset[str] = frozenset()
 
 
 def _token(value: float) -> str:
@@ -410,12 +445,23 @@ def _haar_energies(image: np.ndarray) -> dict[str, float]:
     return {name: value / total for name, value in energies.items()}
 
 
+def native_shape(image: np.ndarray) -> tuple[int, int]:
+    """Height and width of one crop. This is not ``data.image_size``."""
+    channel = _single_channel(image)
+    return int(channel.shape[0]), int(channel.shape[1])
+
+
 def extract_image_features(
     image: np.ndarray,
     spec: FeatureSpec,
     max_missing_fraction: float = MAX_MISSING_FRACTION,
 ) -> dict[str, float]:
-    """Features of one centered IR crop. The label is not an input."""
+    """Features of one centered IR crop. The label is not an input.
+
+    The crop is not resized. Callers that need the crop size use
+    ``native_shape``, which reads the array. A configured deep-model size
+    of 128 is irrelevant.
+    """
     channel = _single_channel(image)
     fraction = missing_fraction(channel)
     if fraction > max_missing_fraction:
@@ -519,17 +565,13 @@ def extract_feature_table(
         built.update(temporal)
         rows.append(built)
     table = pd.DataFrame(rows)
-    banned = set(spec.feature_names()) & set(FORBIDDEN_FEATURES)
-    if banned:
-        raise LeakageError(f"feature names include labels: {sorted(banned)}")
+    assert_no_forbidden_inputs(spec.feature_names(), "feature names include labels")
     return table, dropped
 
 
 def model_matrix(frame: pd.DataFrame, names: tuple[str, ...] | list[str]) -> np.ndarray:
     """Numeric feature matrix. Raises if a label column is requested."""
-    banned = set(names) & set(FORBIDDEN_FEATURES)
-    if banned:
-        raise LeakageError(f"forbidden features in model matrix: {sorted(banned)}")
+    assert_no_forbidden_inputs(names, "forbidden features in model matrix")
     missing = [name for name in names if name not in frame.columns]
     if missing:
         raise KeyError(f"missing feature columns: {missing}")
@@ -540,6 +582,32 @@ def _impute_matrix(values: np.ndarray) -> np.ndarray:
     imputer = SimpleImputer(strategy="median", keep_empty_features=True)
     filled = imputer.fit_transform(values)
     return np.where(np.isfinite(filled), filled, 0.0)
+
+
+def _training_view(
+    frame: pd.DataFrame, target: np.ndarray
+) -> tuple[pd.DataFrame, np.ndarray, frozenset[str]]:
+    """Rows whose storm is in the train side of ``storm_ids_by_split``.
+
+    Val and test rows stay in ``frame`` so a caller can pass a full manifest,
+    and they are dropped before any selection statistic is computed. A storm
+    that sits in two splits raises ``LeakageError``.
+    """
+    if "storm_id" not in frame.columns or "split" not in frame.columns:
+        raise LeakageError("feature selection requires storm_id and split")
+    y = np.asarray(target, dtype=np.float64).ravel()
+    if len(y) != len(frame):
+        raise ValueError("target must align with the selection frame")
+    groups = storm_ids_by_split(frame)
+    train_ids = groups["train"]
+    if not train_ids:
+        raise LeakageError("feature selection needs at least one training storm")
+    mask = frame["storm_id"].astype(str).isin(train_ids).to_numpy()
+    mask = mask & (frame["split"].astype(str) == "train").to_numpy()
+    train = frame.loc[mask].reset_index(drop=True)
+    if train.empty:
+        raise LeakageError("feature selection needs at least one training storm")
+    return train, y[mask], train_ids
 
 
 def select_features(
@@ -554,32 +622,24 @@ def select_features(
     n_estimators: int = 40,
     seed: int = 42,
 ) -> FeatureSelection:
-    """Choose columns from a train frame only.
+    """Fit a correlation filter and RF importance or RFE on train storms.
 
-    Correlation filtering does not look at the label. The forest importance
-    and RFE paths do, so the frame must already be the training split.
+    Correlation filtering does not look at the label. Forest importance and
+    RFE do. Both see only the storms ``storm_ids_by_split`` assigns to train.
+    Changing val or test rows does not change the returned names.
     """
     if source_split != "train":
         raise LeakageError("feature selection is allowed on the train split only")
-    if "split" in frame.columns:
-        present = set(frame["split"].astype(str).unique())
-        if present != {"train"}:
-            raise LeakageError(
-                f"selection frame splits were {sorted(present)}, expected train"
-            )
     names = tuple(feature_names)
-    banned = set(names) & set(FORBIDDEN_FEATURES)
-    if banned:
-        raise LeakageError(f"forbidden features in selection: {sorted(banned)}")
-    if len(frame) < 5:
+    assert_no_forbidden_inputs(names, "forbidden features in selection")
+    train, y, train_storms = _training_view(frame, target)
+    if len(train) < 5:
         raise ValueError("feature selection needs at least 5 training rows")
-    if len(target) != len(frame):
-        raise ValueError("target must align with the selection frame")
     method = method.lower().strip()
     if method not in {"correlation_rf", "rfe", "none"}:
         raise ValueError(f"unknown selection method: {method}")
 
-    values = _impute_matrix(model_matrix(frame, names))
+    values = _impute_matrix(model_matrix(train, names))
     variance = values.var(axis=0)
     kept_mask = variance > 1e-8
     dropped_variance = tuple(name for name, keep in zip(names, kept_mask, strict=True) if not keep)
@@ -605,7 +665,6 @@ def select_features(
         kept_names = [name for name, drop in zip(kept_names, drop_flags, strict=True) if not drop]
         kept_values = kept_values[:, ~drop_flags]
 
-    y = np.asarray(target, dtype=np.float64).ravel()
     cap = max(1, int(max_features))
     if method == "none":
         chosen = kept_names[:cap]
@@ -627,6 +686,7 @@ def select_features(
         importances=importances,
         dropped_variance=dropped_variance,
         dropped_correlation=tuple(dropped_correlation),
+        train_storms=train_storms,
     )
 
 
