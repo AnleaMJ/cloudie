@@ -10,3 +10,22 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt
       - run: pytest
+  # Deep-model tests. The job above does not install torch, so those tests skip there.
+  torch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: pip install "torch>=2.1" "torchvision>=0.16" --index-url https://download.pytorch.org/whl/cpu
+      - run: pytest tests/test_model.py -o addopts= -ra --tb=short | tee pytest-model.txt
+      - name: Fail if model tests skipped
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path("pytest-model.txt").read_text()
+          if re.search(r"\d+ skipped", text) or not re.search(r"\d+ passed", text):
+              sys.exit("model tests did not execute")
+          PY
