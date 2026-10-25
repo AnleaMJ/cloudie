@@ -191,6 +191,7 @@ def test_protocol_locks_the_test_split(tmp_path: Path) -> None:
     payload = json.loads((tmp_path / "selected_features.json").read_text(encoding="utf-8"))
     assert payload["source_split"] == "train"
     assert payload["quote_as_result"] == "no"
+    assert payload["train_storms"] == sorted(report.train_storms)
     train = frame[frame["split"] == "train"]
     val = frame[frame["split"] == "val"]
     expected = regression_metrics(

@@ -12,7 +12,9 @@ literature survey is a result of this repository.
 
 Outer splits are storm-wise, year-block, or basin-holdout. A storm is never
 cut. The test side of that split is locked: feature selection, SMOTE, and
-model fits see training storms only. Phase 2 scores the validation storms.
+model fits see training storms only. `select_features` takes those storms
+from `storm_ids_by_split` and ignores val and test rows that are still in
+the frame. Phase 2 scores the validation storms.
 The deep path in `cloudie/` also reports the test split against the train-set
 mean, and that report is a software check until the imagery is real.
 
