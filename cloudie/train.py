@@ -22,9 +22,16 @@ import pandas as pd
 from cloudie.config import load_config
 from cloudie.data_loader import load_image, load_manifest, resolve_image
 from cloudie.preprocessing import NormStats, fit_norm_stats, prepare_image
-from cloudie.schema import FORBIDDEN_FEATURES, wind_to_imd5
+from cloudie.schema import wind_to_imd5
 from cloudie.sequences import N_FRAMES, size_targets_present, stack_windows
-from cloudie.splits import LeakageError, assign_storms, null_cross_split_links
+from cloudie.splits import (
+    LeakageError,
+    add_previous_frame_id,
+    assert_no_forbidden_inputs,
+    assign_storms,
+    null_cross_split_links,
+    storm_ids_by_split,
+)
 
 SMOKE_BANNER = (
     "Checkpoint was fit on synthetic smoke data. "
@@ -60,10 +67,8 @@ class EarlyStopping:
 
 
 def assert_model_inputs(names: list[str] | tuple[str, ...]) -> None:
-    """Images are the model input. Wind and size labels are not."""
-    banned = sorted(FORBIDDEN_FEATURES.intersection(names))
-    if banned:
-        raise LeakageError(f"forbidden model inputs: {banned}")
+    """Images are the model input. Wind, size, and class labels are not."""
+    assert_no_forbidden_inputs(names, "forbidden model inputs")
 
 
 def class_sample_weights(
@@ -132,8 +137,9 @@ def split_frame(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
         holdout_years=[int(year) for year in holdout_years],
         holdout_basin=None if holdout_basin in (None, "null") else str(holdout_basin),
     )
-    if "prev_sample_id" in assigned.columns:
-        assigned, _dropped = null_cross_split_links(assigned)
+    if "prev_sample_id" not in assigned.columns:
+        assigned = add_previous_frame_id(assigned)
+    assigned, _dropped = null_cross_split_links(assigned)
     return assigned
 
 
@@ -403,6 +409,32 @@ def _load_examples(
     return images, winds, labels, size
 
 
+def fit_split_normalization(
+    frame: pd.DataFrame, manifest: str | Path, config: dict
+) -> NormStats:
+    """Fit pixel mean and std on the train split only.
+
+    The images are the train split. ``data.image_size`` comes from config.
+    A later held-out coverage check reuses ``storm_ids_by_split`` and these
+    stored stats.
+    """
+    groups = storm_ids_by_split(frame)
+    if not groups["train"]:
+        raise LeakageError("normalization stats may be fit on the train split only")
+    raw_images, _winds, _labels, _size = _load_examples(
+        config, frame, Path(manifest), "train", None, False
+    )
+    if uses_sequences(config):
+        norm_frames = [
+            raw_images[index, step]
+            for index in range(raw_images.shape[0])
+            for step in range(raw_images.shape[1])
+        ]
+    else:
+        norm_frames = list(raw_images)
+    return fit_norm_stats(norm_frames, "train")
+
+
 def train(config: dict, manifest_path: str | Path | None = None) -> Path:
     """Fit on the train split and write ``checkpoint.pt`` under ``paths.artifacts``."""
     torch = _torch()
@@ -422,18 +454,7 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
     # Size labels are a training-fold decision, same as class weights.
     size_head = train_size_head(assigned)
     n_frames = model_n_frames(config)
-    raw_images, _raw_winds, _raw_labels, _raw_size = _load_examples(
-        config, assigned, manifest, "train", None, False
-    )
-    if uses_sequences(config):
-        norm_frames = [
-            raw_images[index, step]
-            for index in range(raw_images.shape[0])
-            for step in range(raw_images.shape[1])
-        ]
-    else:
-        norm_frames = list(raw_images)
-    stats = fit_norm_stats(norm_frames, "train")
+    stats = fit_split_normalization(assigned, manifest, config)
     train_images, train_winds, train_labels, train_size = _load_examples(
         config, assigned, manifest, "train", stats, size_head
     )

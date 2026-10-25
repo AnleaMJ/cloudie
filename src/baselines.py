@@ -36,8 +36,13 @@ from src.data_loader import load_manifest
 from src.features import FeatureSpec, extract_feature_table, model_matrix, select_features
 from src.metrics import classification_metrics, metrics_by_class, regression_metrics
 from src.plots import save_confusion_matrix, save_feature_importance, save_regression_scatter
-from src.schema import DEFAULT_NAMES, FORBIDDEN_FEATURES
-from src.splits import LeakageError, assert_no_group_leakage, assign_storms
+from src.schema import DEFAULT_NAMES
+from src.splits import (
+    LeakageError,
+    assert_no_forbidden_inputs,
+    assert_no_group_leakage,
+    assign_storms,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -460,9 +465,7 @@ def run_baselines(
     if unknown:
         raise BaselineDataError(f"unknown splits: {sorted(unknown)}")
     names = tuple(feature_names)
-    banned = set(names) & set(FORBIDDEN_FEATURES)
-    if banned:
-        raise LeakageError(f"refusing to train on {sorted(banned)}")
+    assert_no_forbidden_inputs(names, "refusing to train on")
     parts = [frame[frame["split"] == name] for name in ("train", "val", "test")]
     assert_no_group_leakage(*parts)
     train = parts[0].copy()

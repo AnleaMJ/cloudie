@@ -1,15 +1,78 @@
-"""Storm-safe splits. Random frame splits are rejected."""
+"""Storm-safe splits. Random frame splits are rejected.
+
+``storm_ids_by_split`` returns the disjoint train, val, and test storm ids.
+A later residual-quantile coverage check can reuse that map from an assigned
+frame without assigning rows again.
+"""
 
 from __future__ import annotations
+
+import re
+from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
 
-from cloudie.schema import wind_to_imd5
+from cloudie.schema import DEFAULT_NAMES, FORBIDDEN_FEATURES, wind_to_imd5
+
+_CLASS_SEQUENCES = tuple(
+    tuple(part for part in re.split(r"[^a-z0-9]+", name.lower()) if part)
+    for name in DEFAULT_NAMES
+)
+_COMPACT_MARKERS = ("windspeed", "windkt", "r34", "rmw", "imd5", "intensity")
+_LABEL_TOKENS = frozenset(
+    {"wind", "windspeed", "windkt", "r34", "rmw", "imd5", "intensity", "class"}
+)
 
 
 class LeakageError(RuntimeError):
     """A split shares a storm across sides, or is a random frame split."""
+
+
+def _name_tokens(name: str) -> list[str]:
+    return [part for part in re.split(r"[^a-z0-9]+", str(name).lower()) if part]
+
+
+def _contains_sequence(tokens: list[str], sequence: tuple[str, ...]) -> bool:
+    width = len(sequence)
+    if width == 0 or len(tokens) < width:
+        return False
+    return any(
+        tuple(tokens[index : index + width]) == sequence
+        for index in range(len(tokens) - width + 1)
+    )
+
+
+def is_forbidden_input(name: str) -> bool:
+    """True for a label column or a name derived from wind, size, or class.
+
+    Image features such as ``pixel_mean`` and ``delta_pixel_mean`` stay allowed.
+    """
+    text = str(name).strip().lower()
+    if text in {item.lower() for item in FORBIDDEN_FEATURES}:
+        return True
+    if text in {item.lower() for item in DEFAULT_NAMES}:
+        return True
+    tokens = _name_tokens(text)
+    if any(
+        token in _LABEL_TOKENS or token.startswith(("windspeed", "windkt", "r34", "rmw", "imd5"))
+        for token in tokens
+    ):
+        return True
+    if any(_contains_sequence(tokens, sequence) for sequence in _CLASS_SEQUENCES):
+        return True
+    compact = "".join(tokens)
+    return any(marker in compact for marker in _COMPACT_MARKERS)
+
+
+def forbidden_input_names(names: Iterable[str]) -> list[str]:
+    return sorted({str(name) for name in names if is_forbidden_input(str(name))})
+
+
+def assert_no_forbidden_inputs(names: Iterable[str], detail: str) -> None:
+    banned = forbidden_input_names(names)
+    if banned:
+        raise LeakageError(f"{detail}: {banned}")
 
 
 def assert_no_group_leakage(*frames: pd.DataFrame, group_col: str = "storm_id") -> None:
@@ -29,6 +92,27 @@ def assert_no_group_leakage(*frames: pd.DataFrame, group_col: str = "storm_id") 
             sample_ids.extend(frame["sample_id"].astype(str).tolist())
     if len(sample_ids) != len(set(sample_ids)):
         raise LeakageError("sample_id repeated across splits")
+
+
+def storm_ids_by_split(frame: pd.DataFrame) -> dict[str, frozenset[str]]:
+    """Return disjoint storm ids for ``train``, ``val``, and ``test``.
+
+    A later residual-quantile coverage check can take ``result["test"]``
+    from an assigned frame and score those storms without assigning rows again.
+    """
+    if "storm_id" not in frame.columns or "split" not in frame.columns:
+        raise LeakageError("storm_id and split are required")
+    known = ("train", "val", "test")
+    labels = set(frame["split"].astype(str).unique())
+    unknown = labels - set(known)
+    if unknown:
+        raise LeakageError(f"unknown splits: {sorted(unknown)}")
+    parts = [frame.loc[frame["split"].astype(str) == name] for name in known]
+    assert_no_group_leakage(*parts)
+    return {
+        name: frozenset(part["storm_id"].astype(str))
+        for name, part in zip(known, parts, strict=True)
+    }
 
 
 def _storm_table(frame: pd.DataFrame) -> pd.DataFrame:
@@ -105,12 +189,10 @@ def assign_storms(
         raise LeakageError(
             "random frame splits are forbidden; use storm_wise, chronological, or holdout_basin"
         )
-
     work = frame.copy()
     work["storm_id"] = work["storm_id"].astype(str)
     table = _storm_table(work)
     holdout_years = list(holdout_years or [])
-
     if strategy == "chronological":
         if table["year_min"].isna().any():
             missing = table.loc[table["year_min"].isna(), "storm_id"].tolist()
@@ -158,7 +240,6 @@ def assign_storms(
         )
     else:
         raise LeakageError(f"unknown split strategy: {strategy}")
-
     work["split"] = work["storm_id"].map(assignment)
     if work["split"].isna().any():
         raise LeakageError("some rows were not assigned a split")
@@ -167,17 +248,52 @@ def assign_storms(
     return work
 
 
+def add_previous_frame_id(frame: pd.DataFrame) -> pd.DataFrame:
+    """Attach the previous sample inside the same storm, ordered by time.
+
+    The link is not yet split-safe. Call ``null_cross_split_links`` before
+    using it as a feature.
+    """
+    if "storm_id" not in frame.columns or "sample_id" not in frame.columns:
+        raise LeakageError("storm_id and sample_id are required")
+    out = frame.copy()
+    out["storm_id"] = out["storm_id"].astype(str)
+    out["sample_id"] = out["sample_id"].astype(str)
+    if "timestamp" in out.columns:
+        parsed = pd.to_datetime(out["timestamp"], errors="coerce", utc=True)
+        if parsed.isna().any():
+            order_key = out["timestamp"].astype(str)
+        else:
+            order_key = parsed
+        out = out.assign(_order=order_key)
+        out = out.sort_values(["storm_id", "_order"], kind="mergesort")
+    else:
+        out = out.sort_values(["storm_id"], kind="mergesort")
+    out["prev_sample_id"] = out.groupby("storm_id", sort=False)["sample_id"].shift(1)
+    out = out.drop(columns=["_order"], errors="ignore")
+    return out.sort_index()
+
+
+def _sample_split_lookup(frame: pd.DataFrame) -> pd.Series:
+    """Map sample id strings to the split of the first row with that id."""
+    temporary = frame.assign(_sid=frame["sample_id"].map(str))
+    temporary = temporary.drop_duplicates("_sid")
+    return temporary.set_index("_sid")["split"].astype(str)
+
+
 def null_cross_split_links(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    """Drop previous-frame ids that point outside the row's split."""
+    """Drop previous-frame ids that point outside the row's split.
+
+    Returns the frame and the number of links removed. Unknown previous ids
+    are removed as well; they can hide a filtered-out frame.
+    """
     if "split" not in frame.columns or "prev_sample_id" not in frame.columns:
         raise LeakageError("split and prev_sample_id are required")
-    lookup = (
-        frame.drop_duplicates("sample_id").set_index("sample_id")["split"].astype(str)
-    )
+    lookup = _sample_split_lookup(frame)
     out = frame.copy()
     dropped = 0
     kept: list[object] = []
-    for prev, split in zip(out["prev_sample_id"], out["split"].astype(str)):
+    for prev, split in zip(out["prev_sample_id"], out["split"].astype(str), strict=True):
         if pd.isna(prev):
             kept.append(pd.NA)
             continue
