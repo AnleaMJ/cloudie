@@ -65,7 +65,18 @@ when the train split has no size labels.
   recorded period. The column is required (`1-min`, `3-min`, `10-min`, or
   another single label such as `synthetic`). Mixed periods fail closed.
 - The 17/34/48/64/91 kt bins are the project's grouping, not official IMD
-  classes. `imd5_class` stores that group.
+  classes. `imd5_class` stores that group. `src/evaluate.py` calls this
+  grouping "our own grouping, IMD-style names" and always reports VSCS and
+  ESCS/SuCS. It records `wind_averaging` and does not convert periods.
+- `src/evaluate.py` scores supplied predictions on the test storms from
+  `storm_ids_by_split`. Mean and ridge reuse `src/baselines.py`. Persistence
+  is the previous same-storm wind, not a feature. Normalization calls
+  `fit_split_normalization` in `cloudie/train.py`. That helper is not defined
+  on the splits module; the duplicate split modules were left unchanged.
+  Do not copy this evaluator into `cloudie/evaluate.py`. Monte Carlo dropout
+  coverage reads a sample array. This module does not import torch. A
+  coverage gap larger than the tolerance is labeled `uncalibrated`.
+  `quote_as_result` stays `no`.
 - Image statistics are pixel stats unless a brightness-temperature
   calibration table exists. Do not name raw digital numbers `tb`.
 
