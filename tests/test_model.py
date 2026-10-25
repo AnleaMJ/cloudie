@@ -13,8 +13,9 @@ import pytest
 from cloudie.config import load_config
 
 ROOT = Path(__file__).resolve().parents[1]
-# Native TCIR grid. The configured resize is read from config, not written here as 128.
+# Native TCIR grid, and NASA native chips (Gurung et al. 2023).
 TCIR_NATIVE_SIZE = 201
+NASA_NATIVE_SIZE = 366
 
 
 def _config() -> dict:
@@ -41,10 +42,12 @@ def forbid_imagenet_download(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("torchvision.models._api.load_state_dict_from_url", _forbid_download)
 
 
-def _sizes(config: dict) -> tuple[int, int]:
+def _sizes(config: dict) -> tuple[int, int, int]:
+    """Configured resize, TCIR 201, and NASA 366. The model does not store these."""
     configured = int(config["data"]["image_size"])
-    assert configured != TCIR_NATIVE_SIZE
-    return configured, TCIR_NATIVE_SIZE
+    assert configured == 128
+    assert len({configured, TCIR_NATIVE_SIZE, NASA_NATIVE_SIZE}) == 3
+    return configured, TCIR_NATIVE_SIZE, NASA_NATIVE_SIZE
 
 
 def _batch(torch, channels: int, size: int, seed: int):
@@ -105,10 +108,11 @@ def test_model_source_has_no_fixed_image_size() -> None:
     assert "128" not in source
     assert "201" not in source
     assert "224" not in source
+    assert "366" not in source
     assert "AdaptiveAvgPool2d" in source
 
 
-def test_forward_and_mc_dropout_at_two_sizes(config: dict, forbid_imagenet_download) -> None:
+def test_forward_and_mc_dropout_at_each_native_size(config: dict, forbid_imagenet_download) -> None:
     torch = pytest.importorskip("torch")
     from torch import nn
     from torch.nn.modules.batchnorm import _BatchNorm
