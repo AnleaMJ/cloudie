@@ -489,6 +489,8 @@ def run_baselines(
         n_estimators=choose["n_estimators"],
         seed=choose["seed"],
     )
+    if selection.train_storms != frozenset(train["storm_id"].astype(str)):
+        raise LeakageError("feature selection used storms outside the training split")
     selected = selection.names
     if not selected:
         raise BaselineDataError("feature selection returned no columns")
@@ -614,6 +616,7 @@ def run_baselines(
         "importances": selection.importances,
         "dropped_variance": list(selection.dropped_variance),
         "dropped_correlation": list(selection.dropped_correlation),
+        "train_storms": sorted(selection.train_storms),
         "quote_as_result": "no",
     }
     (destination / "selected_features.json").write_text(
