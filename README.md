@@ -20,6 +20,15 @@ the train split. No score in this repository is a scientific result.
   are noisy. Agreement with a best track is not ground truth.
 - ADT, SATCON, and Dvorak columns in the baseline table are empty until
   those products are joined. Literature RMSE figures are not this repo's scores.
+- Survey and paper numbers (P1 to P8 in `docs/PROJECT_DOCUMENTATION.md`) come
+  from other basins, sensors, splits, and wind averages, so they are not a
+  target this repo has met or a fair comparison. Some headline figures are
+  special cases: P3's 8.60 kt is the time-smoothed model, and P2's 3.79 kt
+  model also takes an earlier intensity as input.
+- NASA labels are HURDAT2 1-minute winds. IMD classes use 3-minute winds. The
+  17/34/48/64/91 kt bins are this project's own grouping, not IMD classes.
+- `dav_simplified_r*` and `haar_energy_*` are simplified versions of the
+  published DAV (P5) and wavelet (P8) methods, not reproductions of them.
 - Monte Carlo dropout returns a mean and a standard deviation. That standard
   deviation is dropout noise. It is not a calibrated prediction interval.
 - Do not commit NASA, TCIR, IBTrACS, or INSAT-3D files. See `docs/DATA_SOURCES.md`.

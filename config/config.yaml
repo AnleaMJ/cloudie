@@ -4,6 +4,8 @@ project:
   honesty: >
     No trained weights are shipped. Smoke images are synthetic.
     This is not an operational forecast or warning system.
+    Best-track labels are noisy, and agreement with them is not ground truth.
+    No survey or smoke number is a result of this project.
 paths:
   manifest: data/manifest.csv
   artifacts: artifacts
