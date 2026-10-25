@@ -42,6 +42,19 @@ Leak-free splits and quality gates (Phase 0–1), then classical baselines
   training folds only, and a single score on the validation storms
 - the test split is not used for selection, resampling, or fitting
 
+`python -m src.evaluate` scores a supplied prediction column on storm-held-out
+test rows. It reports MAE, RMSE, and bias overall and inside our own grouping,
+IMD-style names, and it always includes VSCS and ESCS/SuCS. Mean and ridge
+reuse the train-storm fits in `src/baselines.py`. Persistence is the previous
+wind in the same storm. `wind_averaging` is copied onto the report, for
+example `1min` for NASA 1-minute HURDAT2 winds. IMD definitions use 3-minute
+winds, and the report does not convert between those periods. Residual-quantile
+widths are fit on validation storms. Monte Carlo dropout coverage reads a
+sample array and does not import torch. A coverage gap larger than the
+tolerance is labeled `uncalibrated`. Files under `reports/` are software
+checks. `quote_as_result` stays `no`. This is not a forecast or an
+operational-readiness claim.
+
 The deep path is `cloudie/`:
 
 - Phase 3 trains with early stopping from `train.patience`, writes a
@@ -129,7 +142,7 @@ operational DAV product.
 ## Layout
 
 ```
-src/                     Phase 2 features and classical baselines
+src/                     Phase 2 features, classical baselines, held-out evaluation
 cloudie/                 deep path: train, evaluate, predict, ConvLSTM, Streamlit
 config/                  config.yaml and config_smoke.yaml
 tests/                   pytest, using temporary smoke data
