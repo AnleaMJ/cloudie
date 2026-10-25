@@ -11,6 +11,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
+      # h5py only for the TCIR loader tests; they write a tiny local fixture.
+      - run: pip install "h5py>=3.9"
       - run: pytest
   # One torch job. CPU wheels only. No NASA, TCIR, or TorchGeo download.
   torch:
