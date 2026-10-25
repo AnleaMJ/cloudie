@@ -22,7 +22,12 @@ import pandas as pd
 from cloudie.config import checkpoint_path, load_config, parse_image_size
 from cloudie.data_loader import load_image, load_manifest, resolve_image
 from cloudie.preprocessing import NormStats, fit_norm_stats, prepare_image, stack_prepared
-from cloudie.schema import wind_to_imd5
+from cloudie.schema import (
+    SchemaError,
+    parse_is_synthetic,
+    recorded_wind_averaging,
+    wind_to_imd5,
+)
 from cloudie.sequences import N_FRAMES, size_targets_present, stack_windows
 from cloudie.splits import (
     LeakageError,
@@ -92,12 +97,12 @@ def class_sample_weights(
 
 
 def project_labels(frame: pd.DataFrame, config: dict) -> list[str | None]:
-    """Project class names, only when one wind-averaging period is recorded."""
-    if "wind_averaging" not in frame.columns:
-        return [None] * len(frame)
-    periods = {str(value) for value in frame["wind_averaging"].dropna().unique()}
-    if len(periods) != 1:
-        return [None] * len(frame)
+    """Project class names, only when one wind-averaging period is recorded.
+
+    These names are the project's grouping, not official IMD classes.
+    A missing or mixed period raises instead of leaving the names blank.
+    """
+    recorded_wind_averaging(frame)
     edges = tuple(float(edge) for edge in config["data"]["imd5_edges_kt"])
     names = tuple(str(name) for name in config["data"]["imd5_names"])
     return [
@@ -106,12 +111,17 @@ def project_labels(frame: pd.DataFrame, config: dict) -> list[str | None]:
 
 
 def manifest_is_synthetic(frame: pd.DataFrame) -> bool:
+    """True when any row is explicitly synthetic.
+
+    A missing column or a null flag raises. Null is not treated as real,
+    and one synthetic row keeps the whole manifest marked synthetic.
+    """
     if "is_synthetic" not in frame.columns:
-        return False
-    flags = frame["is_synthetic"].fillna(False)
-    if flags.dtype != bool:
-        flags = flags.astype(str).str.lower().isin({"1", "true", "yes"})
-    return bool(flags.any())
+        raise SchemaError(
+            "is_synthetic is required so a synthetic row cannot be read as real"
+        )
+    flags = [parse_is_synthetic(value) for value in frame["is_synthetic"].tolist()]
+    return any(flags)
 
 
 _TRAIN_KEYS = (
@@ -592,6 +602,7 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
             )
         ),
         "is_synthetic": synthetic,
+        "wind_averaging": wind_period,
         "wind_averaging": wind_period,
         "split": {
             "strategy": str(config["split"]["strategy"]),

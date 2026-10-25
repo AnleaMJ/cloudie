@@ -40,6 +40,18 @@ Monte Carlo dropout puts BatchNorm in eval and Dropout in train.
 `pretrained: true` is refused unless a local environment variable allows the
 ImageNet download. Southern Hemisphere frames are not flipped.
 
+`src/evaluate.py` scores supplied wind predictions on the test storms from a
+storm split. MAE, RMSE, and bias are reported overall and inside our own
+grouping, IMD-style names, including VSCS and ESCS/SuCS. The report records
+`wind_averaging` and does not convert 1-minute NASA HURDAT2 winds into the
+3-minute winds used by IMD class definitions. Mean and ridge reuse
+`src/baselines.py` and are fit on train storms. Persistence is the previous
+wind in the same storm. Residual-quantile widths are fit on validation storms
+and checked on test storms. Monte Carlo dropout coverage reads stored samples
+and does not import torch. Intervals whose coverage misses the nominal level
+by more than the tolerance are labeled `uncalibrated`. The written files are
+software checks. `quote_as_result` stays `no`.
+
 `cloudie/predict.py` and the Streamlit page read a checkpoint.
 `present_as_forecast` stays false. A missing file or a failed missing-pixel
 gate produces no number. The page reports wind speed in knots, the intensity
@@ -65,7 +77,7 @@ used to crop, and best-track intensity is not a feature.
 
 | Feature | What it is | Survey link |
 | --- | --- | --- |
-| `pixel_*` or `tb_*` | Min, max, mean, std, percentiles, interquartile range on finite pixels | Phase-2 mini-project brightness-temperature statistics. `tb_` is used only when the array is already calibrated. |
+| `pixel_*` or `tb_*` | Min, max, mean, std, percentiles, interquartile range on finite pixels | Pixel stats. Raw digital numbers stay `pixel_*`. `tb_` is used only after a brightness-temperature calibration table has been applied. |
 | `cold_frac_*` | Fraction of finite pixels below each configured threshold | Cold-cloud coverage from that mini-project. Thresholds are image units, not a hidden Kelvin scale. |
 | `radial_mean_*` | Mean in equal-width annuli from the crop center | Radial structure. Wrong if the storm is not near the center. |
 | `eye_center_mean`, `cdo_annulus_mean`, `eye_cdo_contrast`, `eye_present` | Warm center minus the surrounding annulus. The flag is contrast at or above `eye_contrast_min`. | A warm-eye versus central-dense-overcast cue. Not an eye bulletin. A cold core is not marked as an eye. |
@@ -139,11 +151,15 @@ crop that fails the missing-pixel gate.
   to record one period.
 - What is a smoke MAE? A software check. It is not a result.
 - What is the Monte Carlo dropout standard deviation? It is the spread of
-  stochastic forward passes. It becomes a prediction interval only after a
-  storm-held-out coverage check, which has not been run.
+  stochastic forward passes. `src/evaluate.py` can score coverage from stored
+  samples, and from validation residual quantiles, on a storm-held-out split.
+  No real-imagery coverage check has been run. A dropout standard deviation
+  is not itself a calibrated interval. Intervals that miss the nominal
+  coverage by more than the tolerance are labeled uncalibrated.
 - Why is 90 knots `VSCS` here when the current IMD sheet starts Extremely
-  Severe at 90 knots? The project edge is the configured value 91 knots,
-  grouping Extremely Severe with Super. The names are not an IMD warning.
+  Severe at 90 knots? The 17/34/48/64/91 kt bins are this project's own
+  grouping, not official IMD classes. The project edge is the configured
+  value 91 knots. The names are not an IMD warning.
 - Why does a smoke checkpoint produce no forecast in the demo? The checkpoint
   records `is_synthetic` and `present_as_forecast: false`. The page shows
   that banner and does not call the number a forecast.

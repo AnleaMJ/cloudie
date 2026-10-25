@@ -32,8 +32,8 @@ from sklearn.feature_selection import RFE
 from sklearn.impute import SimpleImputer
 
 from src.data_loader import load_image, resolve_image
-from src.preprocessing import as_channel_first, missing_fraction
-from src.schema import wind_to_imd5
+from src.preprocessing import MAX_MISSING_FRACTION, as_channel_first, missing_fraction
+from src.schema import FORBIDDEN_FEATURES, parse_is_synthetic, wind_to_imd5
 from src.splits import (
     LeakageError,
     add_previous_frame_id,
@@ -467,7 +467,7 @@ def native_shape(image: np.ndarray) -> tuple[int, int]:
 def extract_image_features(
     image: np.ndarray,
     spec: FeatureSpec,
-    max_missing_fraction: float = 0.30,
+    max_missing_fraction: float = MAX_MISSING_FRACTION,
 ) -> dict[str, float]:
     """Features of one centered IR crop. The label is not an input.
 
@@ -513,7 +513,7 @@ def extract_feature_table(
     frame: pd.DataFrame,
     manifest_path: str,
     spec: FeatureSpec,
-    max_missing_fraction: float = 0.30,
+    max_missing_fraction: float = MAX_MISSING_FRACTION,
 ) -> tuple[pd.DataFrame, int]:
     """Extract features and same-split temporal deltas.
 
@@ -572,7 +572,7 @@ def extract_feature_table(
             "imd5_class": klass,
         }
         if "is_synthetic" in row:
-            built["is_synthetic"] = bool(row["is_synthetic"])
+            built["is_synthetic"] = parse_is_synthetic(row["is_synthetic"])
         built.update(image_features)
         built.update(temporal)
         rows.append(built)

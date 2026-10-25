@@ -31,15 +31,29 @@ the train split. No score in this repository is a scientific result.
 Leak-free splits and quality gates (Phase 0–1), then classical baselines
 (Phase 2, under `src/`):
 
-- pixel or brightness-temperature stats, cold-pixel fractions, a radial
-  profile, a warm-eye flag, simplified deviation-angle variance, GLCM,
-  single-level Haar energy, and a same-storm temporal delta
+- pixel stats (brightness-temperature names only after a calibration table),
+  cold-pixel fractions, a radial profile, a warm-eye flag, simplified
+  deviation-angle variance, GLCM, single-level Haar energy, and a
+  same-storm temporal delta
 - feature selection fit on the training storms only
 - mean, ridge, k-nearest neighbors, RBF SVM, random forest, and XGBoost
   when it is installed, for wind regression and for the five project classes
 - inner `StratifiedGroupKFold` on training storms, SMOTE inside those
   training folds only, and a single score on the validation storms
 - the test split is not used for selection, resampling, or fitting
+
+`python -m src.evaluate` scores a supplied prediction column on storm-held-out
+test rows. It reports MAE, RMSE, and bias overall and inside our own grouping,
+IMD-style names, and it always includes VSCS and ESCS/SuCS. Mean and ridge
+reuse the train-storm fits in `src/baselines.py`. Persistence is the previous
+wind in the same storm. `wind_averaging` is copied onto the report, for
+example `1min` for NASA 1-minute HURDAT2 winds. IMD definitions use 3-minute
+winds, and the report does not convert between those periods. Residual-quantile
+widths are fit on validation storms. Monte Carlo dropout coverage reads a
+sample array and does not import torch. A coverage gap larger than the
+tolerance is labeled `uncalibrated`. Files under `reports/` are software
+checks. `quote_as_result` stays `no`. This is not a forecast or an
+operational-readiness claim.
 
 The deep path is `cloudie/`:
 
@@ -113,8 +127,8 @@ so the software check stays fast. Classical features always keep the native
 crop and assume the storm is already near the center. This code does not
 recenter with a best-track fix.
 
-Project class names are this project's own grouping for metrics, not an IMD
-warning and not the IMD 3-minute scale. IMD uses 3-minute winds. The edges
+Project class names are this project's own grouping for metrics, not official IMD classes, not an IMD warning, and not the IMD 3-minute scale. IMD uses
+3-minute winds. The edges
 are `[17, 34)` `D_DD`, `[34, 48)` `CS`, `[48, 64)` `SCS`, `[64, 91)`
 `VSCS`, and `91` and above `ESCS_SUCS`. The July 2024 IMD 3-minute sheet
 starts Extremely Severe at 90 knots, so 90 knots is `VSCS` here. NASA
@@ -134,7 +148,7 @@ operational DAV product.
 ## Layout
 
 ```
-src/                     Phase 2 features and classical baselines
+src/                     Phase 2 features, classical baselines, held-out evaluation
 cloudie/                 deep path: train, evaluate, predict, ConvLSTM, Streamlit
 config/                  config.yaml and config_smoke.yaml
 tests/                   pytest, using temporary smoke data

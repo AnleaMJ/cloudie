@@ -10,6 +10,9 @@ from PIL import Image
 from src.config import parse_image_size
 from src.splits import LeakageError
 
+# A missing-pixel fraction above this value fails closed. It does not warn.
+MAX_MISSING_FRACTION = 0.30
+
 
 @dataclass(frozen=True)
 class NormStats:
@@ -82,13 +85,15 @@ def prepare_image(
     image: np.ndarray,
     image_size: int | str | None,
     stats: NormStats | None,
-    max_missing_fraction: float = 0.30,
+    max_missing_fraction: float = MAX_MISSING_FRACTION,
 ) -> np.ndarray:
     """Return ``(C, H, W)`` float32. Does not invent brightness temperature.
 
     ``image_size`` ``None`` or ``native`` keeps the chip's height and width.
     An integer resizes to that square. ``max_missing_fraction`` is
     ``data.max_missing_fraction`` when the caller has a config.
+    A missing-pixel fraction above ``max_missing_fraction`` raises. Raw
+    digital numbers stay pixel values; this function does not name them Tb.
     """
     array = as_channel_first(image)
     fraction = missing_fraction(array)
