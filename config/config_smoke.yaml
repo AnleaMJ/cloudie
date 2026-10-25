@@ -14,6 +14,7 @@ data:
   normalize: zscore
   max_missing_fraction: 0.30
   plausible_wind_kt: [0, 200]
+  # Project grouping for metrics. Not official IMD classes and not a warning.
   imd5_edges_kt: [17, 34, 48, 64, 91]
   imd5_names: [D_DD, CS, SCS, VSCS, ESCS_SUCS]
 split:

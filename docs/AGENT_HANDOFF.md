@@ -62,7 +62,12 @@ when the train split has no size labels.
   resolution.
 - Do not present Monte Carlo dropout std as a calibrated forecast interval.
 - Do not apply the project class names unless `wind_averaging` is a single
-  recorded period.
+  recorded period. The column is required (`1-min`, `3-min`, `10-min`, or
+  another single label such as `synthetic`). Mixed periods fail closed.
+- The 17/34/48/64/91 kt bins are the project's grouping, not official IMD
+  classes. `imd5_class` stores that group.
+- Image statistics are pixel stats unless a brightness-temperature
+  calibration table exists. Do not name raw digital numbers `tb`.
 
 ## Done in Phase 4 and Phase 5
 

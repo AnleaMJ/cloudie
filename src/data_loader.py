@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-from src.preprocessing import NormStats, prepare_image
+from src.preprocessing import MAX_MISSING_FRACTION, NormStats, prepare_image
 from src.schema import require_valid
 
 
@@ -39,7 +39,7 @@ def prepare_split(
     split: str,
     image_size: int,
     stats: NormStats | None,
-    max_missing_fraction: float = 0.30,
+    max_missing_fraction: float = MAX_MISSING_FRACTION,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Load one split. ``stats`` must already have been fit on train."""
     rows = frame[frame["split"] == split]
