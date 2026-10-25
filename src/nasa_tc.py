@@ -11,7 +11,21 @@ pulls from the public Source Cooperative blob. The Hugging Face repo
 Images keep their native size. Nothing in this module resizes. Most frames
 are 366 x 366, but the real train side also has 1093 x 1093 frames (stored
 as grey in an RGB JPEG), which TorchGeo's own ``__getitem__`` bilinearly
-resizes to 366. ``native_height`` and ``native_width`` are recorded per row.
+resizes to 366. ``native_height``, ``native_width`` and ``orig_size`` are
+recorded per row. An empirical check (scripted in the PR notes) found that a
+1093 frame covers the same footprint as a 366 frame at about 3x the pixel
+density: its spatial autocorrelation length is about 3.2x longer in pixels,
+and after a 3x area average its texture and cold-cloud fraction match the
+366 frames, while a 366 centre crop does not. ``to_working_grid`` therefore
+area-averages to the 366 working grid, and ``working_resample`` marks which
+rows need it. The manifest itself is never resampled.
+
+Colour-enhanced frames (``npf_000``, ``npf_001``) are not grey IR. They are
+dropped from the manifest and listed with a reason in an exclusions CSV next
+to it.
+
+The manifest never has a ``split`` column. The official side goes only to
+``source_split``. ``src.splits.assign_storms`` writes ``split`` by storm.
 
 Pixel values are an 8-bit rendering of IR brightness, not calibrated Kelvin.
 Call them pixel stats until a calibration table exists.
@@ -40,6 +54,13 @@ from src.schema import require_valid
 WIND_AVERAGING = "1min"
 LABEL_SOURCE = "nasa_tropical_storm_competition_hurdat2"
 SPLITS = ("train", "test")
+WORKING_SIZE = 366  # TorchGeo's grid and config data.image_size: native (PR #16)
+# Known non-IR frames in this release. Frames detected as colour are excluded too.
+KNOWN_EXCLUSIONS = {
+    "npf_000": "colour-enhanced render, not grey IR",
+    "npf_001": "colour-enhanced render, not grey IR",
+}
+EXCLUSION_COLUMNS = ["sample_id", "storm_id", "source_split", "reason"]
 _FILE_STEM = {"train": "training_set", "test": "test_set"}
 
 
@@ -70,6 +91,7 @@ def build_manifest(
     splits: tuple[str, ...] = SPLITS,
     tables: Callable[[str | Path, str], tuple[pd.DataFrame, pd.DataFrame]] = torchgeo_tables,
     check_images: bool = True,
+    keep_excluded: bool = False,
 ) -> pd.DataFrame:
     """Return a validated manifest. ``image_path`` is relative to ``manifest_dir``."""
     root = Path(root).resolve()
@@ -108,7 +130,26 @@ def build_manifest(
     frame = pd.concat(frames, ignore_index=True)
     if check_images:
         frame = add_native_size(frame, manifest_dir)
+    if keep_excluded:
+        return frame
+    frame, _ = split_exclusions(frame)
     return require_valid(frame)
+
+
+def split_exclusions(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (kept, excluded). Excluded rows carry a ``reason``."""
+    reasons = frame["sample_id"].map(KNOWN_EXCLUSIONS)
+    if "grey_ir" in frame:
+        detected = ~frame["grey_ir"].astype(bool) & reasons.isna()
+        reasons = reasons.mask(detected, "channels differ, not grey IR")
+    drop = reasons.notna()
+    excluded = frame.loc[drop, ["sample_id", "storm_id", "source_split"]].assign(reason=reasons[drop])
+    return frame.loc[~drop].reset_index(drop=True), excluded.reset_index(drop=True)
+
+
+def exclusions_for(frame: pd.DataFrame) -> pd.DataFrame:
+    """Exclusions for a raw (pre-filter) frame, in the CSV column order."""
+    return split_exclusions(frame)[1][EXCLUSION_COLUMNS]
 
 
 def _relative(path: Path, base: Path) -> str:
@@ -148,6 +189,10 @@ def add_native_size(frame: pd.DataFrame, manifest_dir: str | Path) -> pd.DataFra
     # False for colour-enhanced frames (npf_000/001 in this release). load_ir
     # refuses them, so filter on this column before training.
     out["grey_ir"] = grey
+    out["orig_size"] = [h if h == w else -1 for h, w in zip(heights, widths)]
+    if (out["orig_size"] < 0).any():
+        raise ValueError("non-square frame found; orig_size assumes square chips")
+    out["working_resample"] = np.where(out["orig_size"] == WORKING_SIZE, "none", "area_average")
     return out
 
 
@@ -172,6 +217,22 @@ def load_ir(path: str | Path) -> np.ndarray:
             raise ValueError(f"{path}: channels differ, not a grey IR render")
         array = array[..., 0]
     return array.astype(np.float32)
+
+
+def to_working_grid(array: np.ndarray, size: int = WORKING_SIZE) -> tuple[np.ndarray, bool]:
+    """Area-average a frame onto the ``size`` grid. Returns (array, resampled).
+
+    Use only for frames that cover the same footprint (the 1093 frames do).
+    A frame already at ``size`` is returned unchanged.
+    """
+    from PIL import Image
+
+    if array.shape == (size, size):
+        return array.astype(np.float32), False
+    if array.ndim != 2 or array.shape[0] != array.shape[1] or array.shape[0] < size:
+        raise ValueError(f"expected a square frame of at least {size}px, got {array.shape}")
+    image = Image.fromarray(array.astype(np.float32), mode="F")
+    return np.asarray(image.resize((size, size), resample=Image.BOX), dtype=np.float32), True
 
 
 def summarize(frame: pd.DataFrame) -> dict[str, object]:
@@ -207,6 +268,13 @@ def summarize(frame: pd.DataFrame) -> dict[str, object]:
         }
         if "native_height" in frame
         else {},
+        "orig_size_counts": {int(k): int(v) for k, v in frame["orig_size"].value_counts().items()}
+        if "orig_size" in frame
+        else {},
+        "frames_to_area_average_to_366": int((frame["working_resample"] == "area_average").sum())
+        if "working_resample" in frame
+        else 0,
+        "has_split_column": "split" in frame.columns,
         "wind_averaging": sorted(frame["wind_averaging"].unique()),
         "is_synthetic": bool(frame["is_synthetic"].any()),
     }
@@ -232,6 +300,23 @@ def save_sample_png(frame: pd.DataFrame, manifest_dir: str | Path, out: str | Pa
     return {"sample_id": row["sample_id"], "wind_speed_kt": float(row["wind_speed_kt"]), "shape": list(image.shape), "png": str(out)}
 
 
+def storm_split_check(frame: pd.DataFrame, strategy: str = "storm_wise", seed: int = 42) -> dict[str, object]:
+    """Run the project splitter on the combined manifest and assert no storm leaks."""
+    from src.splits import assert_no_group_leakage, assign_storms
+
+    if "split" in frame.columns:
+        raise ValueError("manifest must not carry split; use source_split for the official side")
+    assigned = assign_storms(frame, strategy, seed=seed)
+    parts = [assigned.loc[assigned["split"] == name] for name in ("train", "val", "test")]
+    assert_no_group_leakage(*parts)
+    return {
+        "strategy": strategy,
+        "rows": {name: int(len(part)) for name, part in zip(("train", "val", "test"), parts)},
+        "storms": {name: int(part["storm_id"].nunique()) for name, part in zip(("train", "val", "test"), parts)},
+        "leakage": "none",
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", required=True, help="TorchGeo TropicalCyclone root")
@@ -240,14 +325,21 @@ def main() -> None:
     parser.add_argument("--reader", choices=["torchgeo", "csv"], default="torchgeo")
     parser.add_argument("--summary", default="reports/nasa_tc_summary.json")
     parser.add_argument("--sample-png", default="reports/nasa_tc_sample.png")
+    parser.add_argument("--exclusions", default=None, help="default: <manifest dir>/nasa_tc_exclusions.csv")
     args = parser.parse_args()
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     tables = torchgeo_tables if args.reader == "torchgeo" else csv_tables
-    frame = build_manifest(args.root, out.parent, tuple(args.splits), tables)
+    raw = build_manifest(args.root, out.parent, tuple(args.splits), tables, keep_excluded=True)
+    excluded = exclusions_for(raw)
+    frame = require_valid(split_exclusions(raw)[0])
+    exclusions_path = Path(args.exclusions) if args.exclusions else out.parent / "nasa_tc_exclusions.csv"
+    excluded.to_csv(exclusions_path, index=False)
     frame.drop(columns=["imd5_class"]).to_csv(out, index=False)
     summary = summarize(frame)
+    summary["excluded"] = {"count": int(len(excluded)), "sample_ids": excluded["sample_id"].tolist(), "file": str(exclusions_path)}
+    summary["storm_split_check"] = storm_split_check(frame)
     summary["reader"] = args.reader
     summary["manifest"] = str(out)
     summary["sample"] = save_sample_png(frame, out.parent, args.sample_png)

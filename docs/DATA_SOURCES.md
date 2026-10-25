@@ -13,8 +13,14 @@ Do not commit imagery or best-track dumps. CI must not download them.
   builds `data/nasa_tc/manifest.csv` from TorchGeo's CSVs and
   `<root>/<split>/<Image ID>.jpg`. Download once with
   `TropicalCyclone(root, split, download=True)` (needs `azcopy`, public
-  blob, no credentials). Images stay at native size (366×366), recorded as
-  `native_height`/`native_width`. Pixels are an 8-bit render, not Kelvin:
+  blob, no credentials). Images stay at native size, recorded as
+  `native_height`/`native_width`/`orig_size`: 103,590 frames are 366×366
+  and 11,042 are 1093×1093. The 1093 frames cover the same footprint at
+  about 3× pixel density, so `src.nasa_tc.to_working_grid` area-averages
+  them to the 366 grid (`working_resample=area_average`). `npf_000` and
+  `npf_001` are colour-enhanced, not grey IR. They are dropped and listed
+  in `nasa_tc_exclusions.csv` next to the manifest. The manifest has no
+  `split` column; `src.splits.assign_storms` adds it. Pixels are an 8-bit render, not Kelvin:
   call them pixel stats. Labels are HURDAT2 1-minute sustained winds, so
   `wind_averaging=1min`. The competition train/test sides share storms,
   so they are kept only as `source_split`; use storm-wise splits on the
