@@ -8,8 +8,17 @@ Do not commit imagery or best-track dumps. CI must not download them.
   in `config/config.yaml`). Download uses azcopy. Do not download in CI.
   Cite https://doi.org/10.1109/JSTARS.2020.3011907.
   The Hugging Face mirror `torchgeo/tropical_cyclone` lists CC-BY-4.0 and
-  about 2.4 GB. Do not depend on the Hub viewer in CI. A local copy can
-  be turned into a manifest later; this phase does not ship a downloader.
+  about 2.4 GB. It is a mirror only. The main loader is TorchGeo
+  `TropicalCyclone`: `python -m src.nasa_tc --root data/torchgeo_tc`
+  builds `data/nasa_tc/manifest.csv` from TorchGeo's CSVs and
+  `<root>/<split>/<Image ID>.jpg`. Download once with
+  `TropicalCyclone(root, split, download=True)` (needs `azcopy`, public
+  blob, no credentials). Images stay at native size (366×366), recorded as
+  `native_height`/`native_width`. Pixels are an 8-bit render, not Kelvin:
+  call them pixel stats. Labels are HURDAT2 1-minute sustained winds, so
+  `wind_averaging=1min`. The competition train/test sides share storms,
+  so they are kept only as `source_split`; use storm-wise splits on the
+  union. Tests use tiny fake tables and never download.
 - TCIR: https://github.com/BoyoChen/TCIR — MIT repository, 201×201, four
   channels. Confirm satellite redistribution terms separately. Southern
   Hemisphere storms are not silently flipped. Phase 2 features use the
