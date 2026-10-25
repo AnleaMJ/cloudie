@@ -81,14 +81,15 @@ used to crop, and best-track intensity is not a feature.
 | `cold_frac_*` | Fraction of finite pixels below each configured threshold | Cold-cloud coverage from that mini-project. Thresholds are image units, not a hidden Kelvin scale. |
 | `radial_mean_*` | Mean in equal-width annuli from the crop center | Radial structure. Wrong if the storm is not near the center. |
 | `eye_center_mean`, `cdo_annulus_mean`, `eye_cdo_contrast`, `eye_present` | Warm center minus the surrounding annulus. The flag is contrast at or above `eye_contrast_min`. | A warm-eye versus central-dense-overcast cue. Not an eye bulletin. A cold core is not marked as an eye. |
-| `dav_simplified_r*` | Circular variance of (gradient angle minus radial angle) at fixed fractions of the crop half-width. The ring is at least two pixels thick. Pixels with no gradient are ignored, because a zero gradient has no direction. | The survey's DAV work, implemented as a simplified gradient-angle variance. Not operational DAV: no radius search and no flight-level wind. |
+| `dav_simplified_r*` | Circular variance of (gradient angle minus radial angle) at fixed fractions of the crop half-width. The ring is at least two pixels thick. Pixels with no gradient are ignored, because a zero gradient has no direction. | P5 (Ritchie et al. 2012) DAV, implemented as a simplified gradient-angle variance. Not operational DAV: no radius search and no flight-level wind. |
 | `glcm_*` | Contrast, dissimilarity, homogeneity, energy, correlation, and ASM, averaged over four angles at one distance | Grey-level texture. Levels and distance come from config. |
-| `haar_energy_*` | Share of energy in the four single-level Haar bands | The survey's wavelet paper, reduced to one Haar level on one channel. Not a multichannel fusion model. |
+| `haar_energy_*` | Share of energy in the four single-level Haar bands | P8 (Zhang et al. 2025) used a stationary wavelet transform and chose Daubechies-2 after comparing it with Haar. This is a reduced form: one Haar level on one channel. Not a multichannel fusion model. |
 | `has_prev`, `delta_*` | Change versus the previous frame of the same storm after cross-split links are removed. Missing history stays missing and is imputed inside the training fold. | Addresses the limited use of storm history. The link cannot cross train, val, and test. |
 
-Wind speed, R34, RMW, and the class label are forbidden as inputs. That is
-the operational hole called out for best-track-dependent models in the
-survey, including the DeepTCNet setting. Stratifying a split on the label
+Wind speed, R34, RMW, and the class label are forbidden as inputs. The
+survey flags inputs that are not available from the image alone: P4's best
+model (Scheme 3) adds best-track intensity, and P6 (DeepTCNet) adds a TC
+fullness value taken from TC Vitals or best track. Stratifying a split on the label
 is allowed. Feeding the label back in is not.
 
 ## Models
@@ -118,6 +119,29 @@ D_DD, [34, 48) CS, [48, 64) SCS, [64, 91) VSCS, [91, ∞) ESCS_SUCS. Rows below
 17 kt are omitted from classification and kept for regression. NASA
 TropicalCyclone labels are HURDAT2 1-minute winds (`data.wind_averaging:
 1min`). Names are applied only when the manifest records that single period.
+
+## Literature mapping (P1 to P8)
+
+Every row was checked against the paper itself with a live web search on
+25 Oct 2026. Numbers are the papers' own results, never this repository's.
+
+| ID | Paper | What it reports | Cloudie choice it supports | Gap it motivates |
+| --- | --- | --- | --- | --- |
+| P1 | Dharpure et al., "Deep Learning-Based Cyclone Intensity Estimation Using INSAT-3D IR Imagery: A Comparative Study", IJRPR 4(4):4359-4365, Apr 2023 (no DOI) | CNN, RNN and CNN-RNN on 1,184 INSAT-3D IR images over the North Indian Ocean. The abstract gives MAE 4.89 kt for CNN-RNN, but the introduction gives 7.87 kt. | INSAT-3D IR scope, CNN regression | Inconsistent metrics, no split or baselines, small data: storm-wise splits, classical baselines, gated pretrained weights |
+| P2 | Jung et al., Frontiers in Earth Science 11:1285138, published 19 Jan 2024, doi:10.3389/feart.2023.1285138 | COMS to GK2A CNN transfer learning in the Western North Pacific. The image-only TLFFT3 model has a test RMSE of 11.17 kt, against 13.99 kt without transfer. The 3.79 kt 6-hour model also takes an earlier intensity as input. | Transfer across sensors, pretrained ResNet-18 | One basin, one test year, no uncertainty: basin-holdout and year-block splits, MC dropout, best-track-free inputs |
+| P3 | Zhang et al., TCICENet, IEEE JSTARS 14:2070-2086, 2021, doi:10.1109/JSTARS.2021.3050767 | Cascaded classification then estimation on Northwest Pacific IR, tested on 2017-2019. The headline RMSE of 8.60 kt is the time-smoothed TCICENet-S. The unsmoothed model is 9.59 kt. | CNN regression, optional class head | Grade cascade errors, no temporal model: direct regression, `delta_*`, optional ConvLSTM |
+| P4 | Baek et al., TC-SEM, Remote Sensing 14(2):426, 17 Jan 2022, doi:10.3390/rs14020426 | Multi-task CNN for RMW and R34 from COMS IR. The best scheme adds best-track intensity as an input, and the split is a random 68:6:26 frame split. | Size head for R34 and RMW | Best-track input and random frame split: size head without best-track wind, storm never cut |
+| P5 | Ritchie et al., Weather and Forecasting 27(5):1264-1277, Oct 2012, doi:10.1175/WAF-D-11-00156.1 | Improved DAV on 95 North Atlantic storms (2004-2010). RMSE is 12.9 kt overall, 17.7 kt at Category 4 and 32.4 kt at Category 5. It uses the best-track center and picks the best radius per year. | `dav_simplified_r*` | Weak on extremes, needs a best-track center: simplified DAV, pre-centered images, per-class error reporting |
+| P6 | Zhuo and Tan, DeepTCNet, Monthly Weather Review 149(7):2097-2113, Jul 2021, doi:10.1175/MWR-D-20-0333.1 | Physics-augmented VGG-13 on HURSAT-B1 IR, North Atlantic. RMSE is 8.7 kt on the 2017 and 2019 recon-aided test, using a TC fullness input. | CNN regression, multi-task size head | Needs a TC fullness input, Atlantic only: image-only inputs, North Indian Ocean and INSAT path |
+| P7 | Manju et al., PLoS One 20(12):e0330705, 5 Dec 2025, doi:10.1371/journal.pone.0330705 | ConvLSTM on 4 consecutive 6-hour frames, 15 North Indian Ocean cyclones. The 81.1% grading accuracy (MeanShift) and the 7.79 kt RMSE (K-Means) come from different variants. | Optional 4-frame ConvLSTM, project classes | 15 storms, stratified frame split: storm-wise splits, SMOTE inside the fold, MC dropout |
+| P8 | Zhang et al., IEEE JSTARS 18:4711-4735, 2025, doi:10.1109/JSTARS.2025.3531448 | Stationary wavelet transform plus IR, WV and PMW fusion on TCIR (2003-2017). MAE is 3.76 m/s and RMSE is 4.62 m/s. Daubechies-2 was chosen over Haar. | `haar_energy_*`, as a reduced form | Two-stage, no time evolution, no North Indian Ocean test: single-channel Haar, `has_prev` and `delta_*` |
+
+Other sources checked the same day: ConvLSTM was introduced by Shi et al. at
+NIPS 2015 (arXiv:1506.04214). TCIR (Chen, Chen and Lin, KDD 2018) stores
+201x201 frames with IR1, WV, VIS and PMW channels. The NASA Tropical Storm
+Wind Speed labels are HURDAT2 1-minute winds on 366x366 chips (Gurung et al.
+2023, doi:10.1029/2022EA002693). IMD classes use 3-minute winds, and the IMD
+FAQ and SOP Table 1.1 put Extremely Severe at 90 to 119 kt.
 
 ## Results
 
