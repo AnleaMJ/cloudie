@@ -57,10 +57,14 @@ when the train split has no size labels.
   it were.
 - Do not silently flip Southern Hemisphere images.
 - Add pytest coverage for every new module.
-- Read hyperparameters from `config/config.yaml`.
-- `data.image_size` is for the deep model. Classical features stay at native
-  resolution.
+- Read hyperparameters and paths from `config/config.yaml` or
+  `config/config_smoke.yaml`. Do not keep a second copy in code.
+- `data.image_size` is `native` (or null) unless a run sets a square resize.
+  Classical features stay at native resolution. NASA TorchGeo chips are
+  366×366. The smoke config may use a small square.
 - Do not present Monte Carlo dropout std as a calibrated forecast interval.
+- `data.wind_averaging` is `1min` for NASA HURDAT2 labels. The 17/34/48/64/91
+  kt bins are the project's own grouping. IMD uses 3-minute winds.
 - Do not apply the project class names unless `wind_averaging` is a single
   recorded period. The column is required (`1-min`, `3-min`, `10-min`, or
   another single label such as `synthetic`). Mixed periods fail closed.

@@ -8,13 +8,18 @@ paths:
   manifest: data/smoke/manifest.csv
   artifacts: artifacts/smoke
   reports: reports/smoke
+  checkpoint_name: checkpoint.pt
 data:
+  # Small square so the software check stays fast. The NASA config uses native.
   image_size: 64
   channels: 1
   normalize: zscore
   max_missing_fraction: 0.30
   plausible_wind_kt: [0, 200]
-  # Project grouping for metrics. Not official IMD classes and not a warning.
+  # Smoke labels are synthetic. They are not HURDAT2 1-minute winds.
+  wind_averaging: synthetic
+  # Same project bins as config.yaml. IMD itself uses 3-minute winds.
+  # 17/34/48/64/91 kt is this project's grouping, not that IMD scale.
   imd5_edges_kt: [17, 34, 48, 64, 91]
   imd5_names: [D_DD, CS, SCS, VSCS, ESCS_SUCS]
 split:

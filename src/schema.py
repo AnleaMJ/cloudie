@@ -28,7 +28,13 @@ REQUIRED_COLUMNS = ("sample_id", "image_path", "storm_id", "wind_speed_kt")
 FORBIDDEN_FEATURES = frozenset(
     {"wind_speed_kt", "r34_nmi", "rmw_nmi", "imd5_class", "intensity_bin"}
 )
-# Project grouping for metrics. Not official IMD classes and not a warning.
+# Project metric labels, not an IMD warning. Five names group D+DD and
+# ESCS+SuCS. The edges 17/34/48/64/91 kt are this project's own grouping.
+# IMD operational winds are 3-minute averages and are not these bins.
+# NASA HURDAT2 labels are 1-minute winds; config data.wind_averaging is
+# 1min for that dataset. Keep these tuples equal to data.imd5_edges_kt
+# and data.imd5_names. The July 2024 IMD 3-minute sheet starts Extremely
+# Severe at 90 kt, so 90 kt is VSCS here.
 DEFAULT_EDGES_KT = (17.0, 34.0, 48.0, 64.0, 91.0)
 DEFAULT_NAMES = ("D_DD", "CS", "SCS", "VSCS", "ESCS_SUCS")
 DEFAULT_WIND_MIN_KT = 0.0
@@ -61,8 +67,7 @@ def wind_to_imd5(
 ) -> str | None:
     """Return this project's intensity group, or None below the lowest edge.
 
-    The edges are Cloudie's grouping. They are not official IMD classes
-    and they are not a warning product.
+    The names and edges are this project's grouping. They are not official IMD classes, IMD 3-minute categories, or a warning product.
     """
     if len(edges) != len(names):
         raise ValueError("edges and names must have the same length")

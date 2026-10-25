@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
+from src.config import parse_image_size
 from src.splits import LeakageError
 
 # A missing-pixel fraction above this value fails closed. It does not warn.
@@ -53,6 +54,24 @@ def fit_norm_stats(images: list[np.ndarray], source_split: str) -> NormStats:
     return NormStats(mean=float(finite.mean()), std=std, source_split=source_split)
 
 
+def stack_prepared(images: list[np.ndarray]) -> np.ndarray:
+    """Stack chips that have already been prepared.
+
+    A native ``image_size`` does not resize, so every chip in the stack
+    must already share a height and width.
+    """
+    if not images:
+        raise ValueError("no images to stack")
+    try:
+        return np.stack(images)
+    except ValueError as exc:
+        shapes = sorted({tuple(np.shape(image)) for image in images})
+        raise ValueError(
+            "prepared chips do not share a height and width "
+            f"{shapes}. A native image_size does not resize them onto one grid."
+        ) from exc
+
+
 def _resize(image: np.ndarray, size: int) -> np.ndarray:
     channels = []
     for channel in image:
@@ -64,12 +83,15 @@ def _resize(image: np.ndarray, size: int) -> np.ndarray:
 
 def prepare_image(
     image: np.ndarray,
-    image_size: int,
+    image_size: int | str | None,
     stats: NormStats | None,
     max_missing_fraction: float = MAX_MISSING_FRACTION,
 ) -> np.ndarray:
     """Return ``(C, H, W)`` float32. Does not invent brightness temperature.
 
+    ``image_size`` ``None`` or ``native`` keeps the chip's height and width.
+    An integer resizes to that square. ``max_missing_fraction`` is
+    ``data.max_missing_fraction`` when the caller has a config.
     A missing-pixel fraction above ``max_missing_fraction`` raises. Raw
     digital numbers stay pixel values; this function does not name them Tb.
     """
@@ -84,10 +106,11 @@ def prepare_image(
         finite = np.isfinite(filled[index])
         fill = float(np.median(filled[index][finite])) if finite.any() else 0.0
         filled[index][~finite] = fill
-    resized = _resize(filled, image_size)
+    side = parse_image_size(image_size)
+    output = filled if side is None else _resize(filled, side)
     if stats is not None:
-        resized = (resized - stats.mean) / stats.std
-    return resized
+        output = (output - stats.mean) / stats.std
+    return output
 
 
 def dn_to_brightness_temperature(dn: np.ndarray, gain: float, offset: float) -> np.ndarray:

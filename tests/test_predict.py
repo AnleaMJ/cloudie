@@ -16,7 +16,7 @@ from cloudie.predict import (
     predict_images,
     review_flags,
 )
-from cloudie.preprocessing import leave_unflipped
+from cloudie.preprocessing import leave_unflipped, parse_image_size
 
 ROOT = Path(__file__).resolve().parents[1]
 EDGES = (17.0, 34.0, 48.0, 64.0, 91.0)
@@ -48,7 +48,7 @@ def _checkpoint(path: Path, config: dict, **overrides) -> Path:
         "norm_mean": 0.0,
         "norm_std": 1.0,
         "norm_source_split": "train",
-        "image_size": int(config["data"]["image_size"]),
+        "image_size": parse_image_size(config["data"]["image_size"]),
         "max_missing_fraction": 0.30,
         "mean_baseline_kt": 40.0,
         "is_synthetic": True,
@@ -61,7 +61,7 @@ def _checkpoint(path: Path, config: dict, **overrides) -> Path:
     }
     payload.update(overrides)
     if payload["model_name"] == "convlstm" and payload["hidden"] is None:
-        payload["hidden"] = int(config["model"].get("hidden", 16))
+        payload["hidden"] = int(config["model"]["hidden"])
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, path)
     return path
@@ -299,6 +299,28 @@ def test_app_module_imports_without_streamlit_side_effects() -> None:
 
     assert "wind speed" in app.PAGE_LEAD.lower()
     assert "intensity category" in app.PAGE_LEAD.lower()
+
+
+@pytest.mark.parametrize("image_size", [128, 201, 366])
+def test_native_checkpoint_accepts_chip_sizes(tmp_path: Path, image_size: int) -> None:
+    pytest.importorskip("torch")
+    config = _config()
+    config["data"]["image_size"] = "native"
+    checkpoint = _checkpoint(tmp_path / "checkpoint.pt", config)
+    image = np.zeros((image_size, image_size), dtype=np.float32)
+    prediction = predict_images(config, checkpoint, [image])
+    assert prediction.present_as_forecast is False
+    assert prediction.is_synthetic is True
+
+
+def test_native_config_refuses_a_resized_checkpoint(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    config = _config()
+    checkpoint = _checkpoint(tmp_path / "checkpoint.pt", config)
+    config["data"]["image_size"] = "native"
+    image = np.zeros((16, 16), dtype=np.float32)
+    with pytest.raises(ValueError, match="image_size"):
+        predict_images(config, checkpoint, [image])
 
 
 def test_streamlit_page_refuses_a_missing_checkpoint() -> None:

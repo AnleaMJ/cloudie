@@ -58,6 +58,18 @@ def test_smoke_notebook_says_the_images_are_synthetic() -> None:
     assert "do not report" in lowered
 
 
+def test_manifest_wind_period_must_match_config(tmp_path: Path) -> None:
+    from cloudie.make_smoke_data import write_smoke
+    from cloudie.train import train
+
+    config = load_config(ROOT / "config" / "config_smoke.yaml")
+    config["data"]["wind_averaging"] = "1min"
+    manifest = write_smoke(tmp_path / "smoke", size=8)
+    config["paths"]["manifest"] = str(manifest)
+    with pytest.raises(ValueError, match="wind_averaging"):
+        train(config, manifest)
+
+
 def test_missing_checkpoint_is_not_a_forecast(tmp_path: Path) -> None:
     from cloudie.evaluate import evaluate
 
@@ -79,20 +91,24 @@ def test_pretrained_download_is_refused(monkeypatch: pytest.MonkeyPatch) -> None
         build_backbone(config)
 
 
-def test_smoke_train_and_evaluate_are_not_a_forecast(tmp_path: Path) -> None:
+@pytest.mark.parametrize("image_size", [32, "native"])
+def test_smoke_train_and_evaluate_are_not_a_forecast(
+    tmp_path: Path, image_size: int | str
+) -> None:
     pytest.importorskip("torch")
     pytest.importorskip("matplotlib")
     from cloudie.evaluate import evaluate
     from cloudie.make_smoke_data import write_smoke
     from cloudie.train import train
 
+    chip = 16 if image_size == "native" else int(image_size)
     config = load_config(ROOT / "config" / "config_smoke.yaml")
-    config["data"]["image_size"] = 32
+    config["data"]["image_size"] = image_size
     config["train"]["epochs"] = 1
     config["train"]["batch_size"] = 8
     config["paths"]["artifacts"] = str(tmp_path / "artifacts")
     config["paths"]["reports"] = str(tmp_path / "reports")
-    manifest = write_smoke(tmp_path / "smoke", size=32)
+    manifest = write_smoke(tmp_path / "smoke", size=chip)
     config["paths"]["manifest"] = str(manifest)
 
     checkpoint = train(config, manifest)
@@ -108,6 +124,7 @@ def test_smoke_train_and_evaluate_are_not_a_forecast(tmp_path: Path) -> None:
     assert payload["n_frames"] == 1
     assert payload["norm_source_split"] == "train"
     assert payload["wind_averaging"] == "synthetic"
+    assert payload["image_size"] == (None if image_size == "native" else chip)
 
     result = evaluate(config, checkpoint)
     assert result.is_synthetic is True

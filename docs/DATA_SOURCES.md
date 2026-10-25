@@ -3,7 +3,9 @@
 Do not commit imagery or best-track dumps. CI must not download them.
 
 - NASA Tropical Storm Wind Speed, TorchGeo `TropicalCyclone`.
-  Atlantic and East Pacific, 2000–2019. Download uses azcopy.
+  Atlantic and East Pacific, 2000–2019. Chips are 366×366 (Gurung et al. 2023).
+  Labels are HURDAT2 1-minute sustained winds (`data.wind_averaging: 1min`
+  in `config/config.yaml`). Download uses azcopy. Do not download in CI.
   Cite https://doi.org/10.1109/JSTARS.2020.3011907.
   The Hugging Face mirror `torchgeo/tropical_cyclone` lists CC-BY-4.0 and
   about 2.4 GB. Do not depend on the Hub viewer in CI. A local copy can

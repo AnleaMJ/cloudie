@@ -87,9 +87,11 @@ python -m src.baselines --config config/config_smoke.yaml
 ```
 
 `requirements-train.txt` adds PyTorch, torchvision, matplotlib, h5py, and
-Streamlit. CI installs `requirements.txt` only and does not download imagery.
-Training tests, the ConvLSTM tests, and the Streamlit page test skip when
-those packages are absent.
+Streamlit. The `test` job installs `requirements.txt` only and does not
+download imagery, so the training tests, the ConvLSTM tests, and the
+Streamlit page test skip there. The `torch` job installs CPU torch,
+torchvision, and Streamlit and runs those tests. Neither job downloads
+NASA, TCIR, or TorchGeo imagery.
 
 The baseline command writes `reports/smoke/baselines/`. That directory is
 gitignored. The CSV has `quote_as_result=no` on every row. Read
@@ -118,17 +120,21 @@ raise `LeakageError`. A storm that crosses a holdout year or basin is not
 cut. Normalization statistics fit on train only. Augmentation refuses every
 split except train. Wind speed, R34, and RMW are labels, not inputs.
 
-`data.image_size` is the deep-model resize. Classical features keep the
-native crop and assume the storm is already near the center. This code
-does not recenter with a best-track fix.
+`data.image_size: native` keeps each chip's height and width for the deep
+model. NASA TorchGeo chips are 366×366. TCIR chips are 201×201. An integer
+in that field resizes to that square. The smoke config uses a small square
+so the software check stays fast. Classical features always keep the native
+crop and assume the storm is already near the center. This code does not
+recenter with a best-track fix.
 
-Project class names are this project's own grouping, not official IMD classes:
-`[17, 34)` `D_DD`, `[34, 48)` `CS`, `[48, 64)` `SCS`, `[64, 91)`
+Project class names are this project's own grouping for metrics, not official IMD classes, not an IMD warning, and not the IMD 3-minute scale. IMD uses
+3-minute winds. The edges
+are `[17, 34)` `D_DD`, `[34, 48)` `CS`, `[48, 64)` `SCS`, `[64, 91)`
 `VSCS`, and `91` and above `ESCS_SUCS`. The July 2024 IMD 3-minute sheet
-starts Extremely Severe at 90 knots, so 90 knots is `VSCS` under this
-project's 91 kt edge. These names are not a warning. They are applied only
-when `wind_averaging` records one period for the manifest, such as `1-min`,
-`3-min`, or `10-min`. Mixed periods are rejected.
+starts Extremely Severe at 90 knots, so 90 knots is `VSCS` here. NASA
+TropicalCyclone labels are HURDAT2 1-minute winds (`data.wind_averaging:
+1min`). These names are applied only when the manifest records that single
+period.
 
 ## Failure modes
 

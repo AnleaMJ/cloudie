@@ -107,16 +107,22 @@ and empty.
 The deep path adds `SimpleCNN`, ResNet-18, and the optional ConvLSTM. A
 smoke fit is not a row in the results table below.
 
-Project class edges are this project's own grouping, not official IMD classes:
-[17, 34) D_DD, [34, 48) CS, [48, 64) SCS, [64, 91) VSCS, [91, ∞)
-ESCS_SUCS. They are not a warning product. Rows below 17 kt are omitted
-from classification and kept for regression. Names are applied only when
-`wind_averaging` records one period for the whole manifest.
+`data.image_size: native` keeps each chip's height and width. NASA TorchGeo
+chips are 366×366 (Gurung et al. 2023). TCIR chips are 201×201. An integer
+resizes the deep model to that square. Classical features stay on the native
+crop either way.
+
+Project class edges are this project's own grouping, not an IMD warning and
+not the IMD 3-minute scale. IMD uses 3-minute winds. The edges are [17, 34)
+D_DD, [34, 48) CS, [48, 64) SCS, [64, 91) VSCS, [91, ∞) ESCS_SUCS. Rows below
+17 kt are omitted from classification and kept for regression. NASA
+TropicalCyclone labels are HURDAT2 1-minute winds (`data.wind_averaging:
+1min`). Names are applied only when the manifest records that single period.
 
 ## Results
 
 No experiment has been run. Leave this section empty until a real training
-run on real imagery. Files written by `python -m src.baselines` are software
+run on real imagery. Files written by `python -m src.baselines --config config/config_smoke.yaml` are software
 checks. Smoke rows are marked `synthetic=yes` and `quote_as_result=no`.
 Do not paste those numbers here. Do not paste a smoke-test loss from
 `cloudie` here either.
@@ -139,8 +145,10 @@ crop that fails the missing-pixel gate.
 - Why is SMOTE inside the fold? Synthetic rows must not be built from
   validation or test storms.
 - What is simplified DAV not? It is not the operational radius-search product.
-- Why can NASA winds not be labeled with IMD names blindly? Averaging
-  periods differ. The column `wind_averaging` has to say which one.
+- Why can NASA winds not be labeled with IMD names blindly? NASA labels are
+  HURDAT2 1-minute winds. IMD categories use 3-minute winds. The
+  17/34/48/64/91 kt bins are this project's grouping. `wind_averaging` has
+  to record one period.
 - What is a smoke MAE? A software check. It is not a result.
 - What is the Monte Carlo dropout standard deviation? It is the spread of
   stochastic forward passes. `src/evaluate.py` can score coverage from stored
