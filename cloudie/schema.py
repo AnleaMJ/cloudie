@@ -12,8 +12,12 @@ FORBIDDEN_FEATURES = frozenset(
 )
 
 # Project metric labels, not an IMD warning. Five names group D+DD and
-# ESCS+SuCS. The configured VSCS/ESCS_SUCS edge is 91 kt. The July 2024 IMD
-# 3-minute sheet starts Extremely Severe at 90 kt, so 90 kt is VSCS here.
+# ESCS+SuCS. The edges 17/34/48/64/91 kt are this project's own grouping.
+# IMD operational winds are 3-minute averages and are not these bins.
+# NASA HURDAT2 labels are 1-minute winds; config data.wind_averaging is
+# 1min for that dataset. Keep these tuples equal to data.imd5_edges_kt
+# and data.imd5_names. The July 2024 IMD 3-minute sheet starts Extremely
+# Severe at 90 kt, so 90 kt is VSCS here.
 DEFAULT_EDGES_KT = (17.0, 34.0, 48.0, 64.0, 91.0)
 DEFAULT_NAMES = ("D_DD", "CS", "SCS", "VSCS", "ESCS_SUCS")
 
@@ -38,7 +42,10 @@ def wind_to_imd5(
     edges: tuple[float, ...] = DEFAULT_EDGES_KT,
     names: tuple[str, ...] = DEFAULT_NAMES,
 ) -> str | None:
-    """Return a project class, or None below the depression threshold."""
+    """Return a project class, or None below the depression threshold.
+
+    The names are this project's grouping. They are not IMD 3-minute categories.
+    """
     if len(edges) != len(names):
         raise ValueError("edges and names must have the same length")
     if pd.isna(wind_kt) or float(wind_kt) < edges[0]:

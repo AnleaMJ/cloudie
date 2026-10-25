@@ -16,9 +16,10 @@ from pathlib import Path
 
 import numpy as np
 
+from cloudie.config import image_sizes_match, parse_image_size
 from cloudie.preprocessing import NormStats, leave_unflipped, prepare_image
 from cloudie.schema import wind_to_imd5
-from cloudie.train import NOT_A_FORECAST, SMOKE_BANNER, build_net
+from cloudie.train import NOT_A_FORECAST, SMOKE_BANNER, assert_normalize, build_net
 
 MISSING_CHECKPOINT_BANNER = (
     "No checkpoint was found. There is no model output. This is not a forecast."
@@ -205,7 +206,7 @@ def _banner(payload: dict) -> str:
 
 
 def _mc_samples(config: dict) -> int:
-    count = int(config["model"].get("mc_samples", 20))
+    count = int(config["model"]["mc_samples"])
     if count < 1:
         raise ValueError("model.mc_samples must be at least 1")
     return count
@@ -243,7 +244,7 @@ def _wind_samples(model, model_input, n_samples: int, seed: int) -> tuple[float,
 
 
 def _plausible_kt(config: dict) -> tuple[float, float]:
-    raw = config.get("data", {}).get("plausible_wind_kt", DEFAULT_PLAUSIBLE_KT)
+    raw = config["data"]["plausible_wind_kt"]
     low, high = float(raw[0]), float(raw[1])
     if high <= low:
         raise ValueError("data.plausible_wind_kt must be a rising span")
@@ -315,17 +316,18 @@ def predict_images(
         return missing_checkpoint(path)
     jump = _advisory_jump_kt(config)
     payload = _load_checkpoint(path)
-    if str(config["model"].get("name", "simple_cnn")) != str(payload["model_name"]):
+    assert_normalize(config)
+    if str(config["model"]["name"]) != str(payload["model_name"]):
         raise ValueError("config model.name does not match the checkpoint")
-    if int(config["data"]["image_size"]) != int(payload["image_size"]):
+    if not image_sizes_match(config["data"]["image_size"], payload["image_size"]):
         raise ValueError("config image_size does not match the checkpoint")
-    if payload.get("hidden") is not None and int(config["model"].get("hidden", 16)) != int(
+    if payload.get("hidden") is not None and int(config["model"]["hidden"]) != int(
         payload["hidden"]
     ):
         raise ValueError("config model.hidden does not match the checkpoint")
     if str(payload.get("norm_source_split")) != "train":
         raise ValueError("checkpoint normalization was not fit on train")
-    expected = int(payload.get("n_frames", 1))
+    expected = int(payload["n_frames"])
     synthetic = bool(payload.get("is_synthetic"))
     if len(images) != expected:
         return _refusal(
@@ -340,7 +342,7 @@ def predict_images(
         std=float(payload["norm_std"]),
         source_split="train",
     )
-    image_size = int(payload["image_size"])
+    image_size = parse_image_size(payload["image_size"])
     max_missing = float(payload["max_missing_fraction"])
     prepared: list[np.ndarray] = []
     try:
@@ -383,7 +385,7 @@ def predict_images(
     size_head = bool(payload.get("size_head", False))
     model = build_net(config, size_head=size_head)
     model.load_state_dict(payload["state_dict"])
-    seed = int(config.get("project", {}).get("seed", 0))
+    seed = int(config["project"]["seed"])
     low_kt, high_kt = _plausible_kt(config)
     wind_kt, samples = _wind_samples(model, model_input, _mc_samples(config), seed)
     edges = _edges(payload, config)

@@ -10,12 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from cloudie.config import load_config
+from cloudie.config import load_config, parse_image_size
 
 ROOT = Path(__file__).resolve().parents[1]
-# Native TCIR grid, and NASA native chips (Gurung et al. 2023).
-TCIR_NATIVE_SIZE = 201
-NASA_NATIVE_SIZE = 366
+# 128 is a square resize, 201 is a TCIR chip, 366 is a NASA TorchGeo chip
+# (Gurung et al. 2023). The model does not store these sizes.
+CHIP_SIZES = [128, 201, 366]
 
 
 def _config() -> dict:
@@ -33,6 +33,7 @@ def config() -> dict:
     assert float(loaded["model"]["dropout"]) > 0
     assert int(loaded["model"]["mc_samples"]) >= 2
     assert int(loaded["data"]["channels"]) == 1
+    assert parse_image_size(loaded["data"]["image_size"]) is None
     return loaded
 
 
@@ -40,14 +41,6 @@ def config() -> dict:
 def forbid_imagenet_download(monkeypatch: pytest.MonkeyPatch):
     pytest.importorskip("torchvision")
     monkeypatch.setattr("torchvision.models._api.load_state_dict_from_url", _forbid_download)
-
-
-def _sizes(config: dict) -> tuple[int, int, int]:
-    """Configured resize, TCIR 201, and NASA 366. The model does not store these."""
-    configured = int(config["data"]["image_size"])
-    assert configured == 128
-    assert len({configured, TCIR_NATIVE_SIZE, NASA_NATIVE_SIZE}) == 3
-    return configured, TCIR_NATIVE_SIZE, NASA_NATIVE_SIZE
 
 
 def _batch(torch, channels: int, size: int, seed: int):
@@ -112,7 +105,8 @@ def test_model_source_has_no_fixed_image_size() -> None:
     assert "AdaptiveAvgPool2d" in source
 
 
-def test_forward_and_mc_dropout_at_each_native_size(config: dict, forbid_imagenet_download) -> None:
+@pytest.mark.parametrize("image_size", CHIP_SIZES)
+def test_forward_and_mc_dropout_at_each_native_size(config: dict, forbid_imagenet_download, image_size: int) -> None:
     torch = pytest.importorskip("torch")
     from torch import nn
     from torch.nn.modules.batchnorm import _BatchNorm
@@ -131,73 +125,73 @@ def test_forward_and_mc_dropout_at_each_native_size(config: dict, forbid_imagene
         ),
     )
 
-    for size in _sizes(config):
-        inputs = _batch(torch, channels, size, seed)
-        for build in builders:
-            torch.manual_seed(seed)
-            model = build()
-            pools = [layer for layer in model.modules() if isinstance(layer, nn.AdaptiveAvgPool2d)]
-            assert pools
-            assert all(layer.output_size in (1, (1, 1)) for layer in pools)
-            assert model.class_head is None
+    inputs = _batch(torch, channels, image_size, seed)
+    for build in builders:
+        torch.manual_seed(seed)
+        model = build()
+        pools = [layer for layer in model.modules() if isinstance(layer, nn.AdaptiveAvgPool2d)]
+        assert pools
+        assert all(layer.output_size in (1, (1, 1)) for layer in pools)
+        assert model.class_head is None
 
-            output = model(inputs)
-            assert torch.is_tensor(output)
-            assert tuple(output.shape) == (2, 1)
-            assert torch.isfinite(output).all()
+        output = model(inputs)
+        assert torch.is_tensor(output)
+        assert tuple(output.shape) == (2, 1)
+        assert torch.isfinite(output).all()
 
-            if isinstance(model, ResNetRegressor):
-                conv1 = model.backbone.conv1
-                assert int(conv1.in_channels) == 3
-                assert int(conv1.weight.shape[1]) == 3
-                seen: dict[str, int] = {}
+        if isinstance(model, ResNetRegressor):
+            conv1 = model.backbone.conv1
+            assert int(conv1.in_channels) == 3
+            assert int(conv1.weight.shape[1]) == 3
+            seen: dict[str, int] = {}
 
-                def _channels(_module, args, box=seen):
-                    box["channels"] = int(args[0].shape[1])
+            def _channels(_module, args, box=seen):
+                box["channels"] = int(args[0].shape[1])
 
-                handle = conv1.register_forward_pre_hook(_channels)
+            handle = conv1.register_forward_pre_hook(_channels)
+            model(inputs)
+            handle.remove()
+            assert seen["channels"] == 3
+            held = conv1.weight.detach().clone()
+            batchnorm = [layer for layer in model.modules() if isinstance(layer, _BatchNorm)]
+            assert batchnorm
+            initial = _bn_snapshot(model)
+            model.train()
+            with torch.no_grad():
                 model(inputs)
-                handle.remove()
-                assert seen["channels"] == 3
-                held = conv1.weight.detach().clone()
-                batchnorm = [layer for layer in model.modules() if isinstance(layer, _BatchNorm)]
-                assert batchnorm
-                initial = _bn_snapshot(model)
-                model.train()
-                with torch.no_grad():
-                    model(inputs)
-                warmed = _bn_snapshot(model)
-                assert not _same_snapshot(initial, warmed)
-                flags = _watch_modes(model)
-                mean, std = MCDropout.predict(model, inputs, n_samples)
-                assert torch.equal(conv1.weight, held)
-                assert _same_snapshot(warmed, _bn_snapshot(model))
-                assert flags["batchnorm"]
-                assert all(flag is False for flag in flags["batchnorm"])
-                assert flags["dropout"]
-                assert all(flag is True for flag in flags["dropout"])
-                assert model.training is False
-                assert all(layer.training is False for layer in batchnorm)
-                assert all(
-                    layer.training is True
-                    for layer in model.modules()
-                    if isinstance(layer, nn.Dropout)
-                )
-            else:
-                assert not any(isinstance(layer, _BatchNorm) for layer in model.modules())
-                flags = _watch_modes(model)
-                mean, std = mc_dropout_predict(model, inputs, n_samples)
-                assert flags["dropout"]
-                assert all(flag is True for flag in flags["dropout"])
-                assert flags["batchnorm"] == []
+            warmed = _bn_snapshot(model)
+            assert not _same_snapshot(initial, warmed)
+            flags = _watch_modes(model)
+            mean, std = MCDropout.predict(model, inputs, n_samples)
+            assert torch.equal(conv1.weight, held)
+            assert _same_snapshot(warmed, _bn_snapshot(model))
+            assert flags["batchnorm"]
+            assert all(flag is False for flag in flags["batchnorm"])
+            assert flags["dropout"]
+            assert all(flag is True for flag in flags["dropout"])
+            assert model.training is False
+            assert all(layer.training is False for layer in batchnorm)
+            assert all(
+                layer.training is True
+                for layer in model.modules()
+                if isinstance(layer, nn.Dropout)
+            )
+        else:
+            assert not any(isinstance(layer, _BatchNorm) for layer in model.modules())
+            flags = _watch_modes(model)
+            mean, std = mc_dropout_predict(model, inputs, n_samples)
+            assert flags["dropout"]
+            assert all(flag is True for flag in flags["dropout"])
+            assert flags["batchnorm"] == []
 
-            assert tuple(mean.shape) == (2, 1)
-            assert tuple(std.shape) == (2, 1)
-            assert torch.isfinite(mean).all()
-            assert torch.all(std > 0)
+        assert tuple(mean.shape) == (2, 1)
+        assert tuple(std.shape) == (2, 1)
+        assert torch.isfinite(mean).all()
+        assert torch.all(std > 0)
 
 
-def test_optional_class_head_shapes(config: dict, forbid_imagenet_download) -> None:
+@pytest.mark.parametrize("image_size", CHIP_SIZES)
+def test_optional_class_head_shapes(config: dict, forbid_imagenet_download, image_size: int) -> None:
     torch = pytest.importorskip("torch")
 
     from cloudie.model import MCDropout, OptionalClassHead, ResNetRegressor, SimpleCNN
@@ -211,35 +205,34 @@ def test_optional_class_head_shapes(config: dict, forbid_imagenet_download) -> N
     with pytest.raises(ValueError, match="n_classes"):
         OptionalClassHead.build(8, 0)
 
-    for size in _sizes(config):
-        inputs = _batch(torch, channels, size, seed)
-        for model in (
-            SimpleCNN(in_channels=channels, dropout=dropout, n_classes=n_classes),
-            ResNetRegressor(
-                in_channels=channels,
-                pretrained=False,
-                dropout=dropout,
-                n_classes=n_classes,
-            ),
-        ):
-            wind, logits = model(inputs)
-            assert tuple(wind.shape) == (2, 1)
-            assert tuple(logits.shape) == (2, n_classes)
-            assert int(model.class_head.in_features) == int(model.feature_dim)
-            torch.manual_seed(seed)
-            mean, std = MCDropout.predict(model, inputs, n_samples)
-            assert tuple(mean.shape) == (2, 1)
-            assert torch.all(std > 0)
+    inputs = _batch(torch, channels, image_size, seed)
+    for model in (
+        SimpleCNN(in_channels=channels, dropout=dropout, n_classes=n_classes),
+        ResNetRegressor(
+            in_channels=channels,
+            pretrained=False,
+            dropout=dropout,
+            n_classes=n_classes,
+        ),
+    ):
+        wind, logits = model(inputs)
+        assert tuple(wind.shape) == (2, 1)
+        assert tuple(logits.shape) == (2, n_classes)
+        assert int(model.class_head.in_features) == int(model.feature_dim)
+        torch.manual_seed(seed)
+        mean, std = MCDropout.predict(model, inputs, n_samples)
+        assert tuple(mean.shape) == (2, 1)
+        assert torch.all(std > 0)
 
 
+@pytest.mark.parametrize("image_size", CHIP_SIZES)
 def test_resnet_conv1_accepts_three_channels_without_repeating(
-    config: dict, forbid_imagenet_download
+    config: dict, forbid_imagenet_download, image_size: int
 ) -> None:
     torch = pytest.importorskip("torch")
 
     from cloudie.model import ResNetRegressor
 
-    size = _sizes(config)[0]
     model = ResNetRegressor(
         in_channels=3, pretrained=False, dropout=float(config["model"]["dropout"])
     )
@@ -249,7 +242,7 @@ def test_resnet_conv1_accepts_three_channels_without_repeating(
         box["channels"] = int(args[0].shape[1])
 
     model.backbone.conv1.register_forward_pre_hook(_channels)
-    output = model(_batch(torch, 3, size, int(config["project"]["seed"])))
+    output = model(_batch(torch, 3, image_size, int(config["project"]["seed"])))
     assert seen["channels"] == 3
     assert tuple(output.shape) == (2, 1)
     with pytest.raises(ValueError, match="conv1"):
@@ -335,3 +328,38 @@ def test_mc_dropout_rejects_a_single_pass() -> None:
     inputs = torch.zeros(1, int(_config()["data"]["channels"]), 8, 8)
     with pytest.raises(ValueError, match="n_samples"):
         MCDropout.predict(model, inputs, 1)
+
+
+@pytest.mark.parametrize("image_size", CHIP_SIZES)
+def test_convlstm_accepts_chip_sizes(config: dict, image_size: int) -> None:
+    torch = pytest.importorskip("torch")
+
+    from cloudie.model import ConvLSTMRegressor
+
+    model = ConvLSTMRegressor(
+        in_channels=int(config["data"]["channels"]),
+        hidden=int(config["model"]["hidden"]),
+        n_frames=int(config["model"]["n_frames"]),
+        dropout=float(config["model"]["dropout"]),
+    )
+    inputs = torch.zeros(
+        1,
+        int(config["model"]["n_frames"]),
+        int(config["data"]["channels"]),
+        image_size,
+        image_size,
+    )
+    output = model(inputs)
+    assert tuple(output.shape) == (1, 1)
+    assert torch.isfinite(output).all()
+
+
+@pytest.mark.parametrize("image_size", CHIP_SIZES)
+def test_src_simple_cnn_accepts_chip_sizes(image_size: int) -> None:
+    torch = pytest.importorskip("torch")
+
+    from src.model import SimpleCNN
+
+    output = SimpleCNN()(torch.zeros(1, 1, image_size, image_size))
+    assert tuple(output.shape) == (1, 1)
+    assert torch.isfinite(output).all()

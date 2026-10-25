@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-from src.preprocessing import NormStats, prepare_image
+from src.preprocessing import NormStats, prepare_image, stack_prepared
 from src.schema import require_valid
 
 
@@ -37,11 +37,15 @@ def prepare_split(
     frame: pd.DataFrame,
     manifest_path: str | Path,
     split: str,
-    image_size: int,
+    image_size: int | str | None,
     stats: NormStats | None,
     max_missing_fraction: float = 0.30,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Load one split. ``stats`` must already have been fit on train."""
+    """Load one split. ``stats`` must already have been fit on train.
+
+    ``image_size`` comes from ``data.image_size``. ``native`` keeps each
+    chip's height and width, and those chips must already share a shape.
+    """
     rows = frame[frame["split"] == split]
     images = []
     winds = []
@@ -53,4 +57,4 @@ def prepare_split(
         winds.append(float(row.wind_speed_kt))
     if not images:
         raise ValueError(f"split {split} has no rows")
-    return np.stack(images), np.asarray(winds, dtype=np.float32)
+    return stack_prepared(images), np.asarray(winds, dtype=np.float32)

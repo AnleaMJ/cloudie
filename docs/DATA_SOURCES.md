@@ -3,7 +3,9 @@
 Do not commit imagery or best-track dumps. CI must not download them.
 
 - NASA Tropical Storm Wind Speed, TorchGeo `TropicalCyclone`.
-  Atlantic and East Pacific, 2000–2019. Download uses azcopy.
+  Atlantic and East Pacific, 2000–2019. Chips are 366×366 (Gurung et al. 2023).
+  Labels are HURDAT2 1-minute sustained winds (`data.wind_averaging: 1min`
+  in `config/config.yaml`). Download uses azcopy. Do not download in CI.
   Cite https://doi.org/10.1109/JSTARS.2020.3011907.
   The Hugging Face mirror `torchgeo/tropical_cyclone` lists CC-BY-4.0 and
   about 2.4 GB. Do not depend on the Hub viewer in CI. A local copy can
@@ -20,9 +22,9 @@ Do not commit imagery or best-track dumps. CI must not download them.
 - TC PRIMED: https://doi.org/10.25921/dmy1-0595. Optional later source.
 
 Wind averaging period must be a column. Do not mix 1-minute and 10-minute
-winds in one label field. Project class names follow IMD sustained-wind
-thresholds but are not an IMD warning product, and they are not automatically
-valid for non-IMD winds.
+winds in one label field. The 17/34/48/64/91 kt bins are this project's own
+grouping for error tables. IMD itself uses 3-minute winds, so those bins are
+not an IMD warning product and they are not the IMD 3-minute scale.
 
 `center_source` may be `dataset_precentered` or a fix available at image
 time. Do not crop with a best-track center revised after the image time.

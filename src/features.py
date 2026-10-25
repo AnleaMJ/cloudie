@@ -15,8 +15,9 @@ center. This module does not recenter with a best-track fix.
 Temporal deltas use the previous frame of the same storm after cross-split
 links have been removed. Wind, R34, RMW, and class labels are not features.
 
-Crop height and width are the array shape. ``data.image_size`` is the deep
-model's resize and is not applied here. Feature selection calls
+Crop height and width are the array shape. ``data.image_size`` may be
+``native`` or a square resize for the deep model. It is not applied here.
+Feature selection calls
 ``storm_ids_by_split`` and fits only the training storms.
 """
 
@@ -102,23 +103,35 @@ class FeatureSpec:
 
     @classmethod
     def from_config(cls, config: dict) -> FeatureSpec:
-        raw = dict(config.get("features") or {})
-        raw.pop("selection", None)
-        if "cold_thresholds" in raw:
-            raw["cold_thresholds"] = tuple(float(value) for value in raw["cold_thresholds"])
-        if "dav_radii_fractions" in raw:
-            raw["dav_radii_fractions"] = tuple(float(value) for value in raw["dav_radii_fractions"])
+        raw = config.get("features")
+        if not isinstance(raw, dict):
+            raise KeyError("config features is required")
+        required = (
+            "calibrated",
+            "cold_thresholds",
+            "radial_bins",
+            "eye_radius_fraction",
+            "cdo_outer_fraction",
+            "eye_contrast_min",
+            "dav_radii_fractions",
+            "dav_annulus_width_fraction",
+            "glcm_levels",
+            "glcm_distance",
+        )
+        missing = [key for key in required if key not in raw]
+        if missing:
+            raise KeyError(f"config features missing {missing}")
         return cls(
-            calibrated=bool(raw.get("calibrated", False)),
-            cold_thresholds=raw.get("cold_thresholds", cls.cold_thresholds),
-            radial_bins=int(raw.get("radial_bins", 8)),
-            eye_radius_fraction=float(raw.get("eye_radius_fraction", 0.12)),
-            cdo_outer_fraction=float(raw.get("cdo_outer_fraction", 0.35)),
-            eye_contrast_min=float(raw.get("eye_contrast_min", 2.0)),
-            dav_radii_fractions=raw.get("dav_radii_fractions", cls.dav_radii_fractions),
-            dav_annulus_width_fraction=float(raw.get("dav_annulus_width_fraction", 0.08)),
-            glcm_levels=int(raw.get("glcm_levels", 16)),
-            glcm_distance=int(raw.get("glcm_distance", 1)),
+            calibrated=bool(raw["calibrated"]),
+            cold_thresholds=tuple(float(value) for value in raw["cold_thresholds"]),
+            radial_bins=int(raw["radial_bins"]),
+            eye_radius_fraction=float(raw["eye_radius_fraction"]),
+            cdo_outer_fraction=float(raw["cdo_outer_fraction"]),
+            eye_contrast_min=float(raw["eye_contrast_min"]),
+            dav_radii_fractions=tuple(float(value) for value in raw["dav_radii_fractions"]),
+            dav_annulus_width_fraction=float(raw["dav_annulus_width_fraction"]),
+            glcm_levels=int(raw["glcm_levels"]),
+            glcm_distance=int(raw["glcm_distance"]),
         )
 
     def feature_groups(self) -> dict[str, tuple[str, ...]]:
@@ -459,8 +472,7 @@ def extract_image_features(
     """Features of one centered IR crop. The label is not an input.
 
     The crop is not resized. Callers that need the crop size use
-    ``native_shape``, which reads the array. A configured deep-model size
-    of 128 is irrelevant.
+    ``native_shape``, which reads the array. ``data.image_size`` is not applied.
     """
     channel = _single_channel(image)
     fraction = missing_fraction(channel)

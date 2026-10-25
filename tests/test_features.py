@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.config import load_config
 from src.features import (
     FeatureSpec,
     extract_feature_table,
@@ -350,9 +351,12 @@ def test_haar_energies_on_synthetic_image() -> None:
     assert sum(stripe_features[name] for name in ("haar_energy_ll", "haar_energy_lh", "haar_energy_hl", "haar_energy_hh")) == pytest.approx(1.0)
 
 
-def test_features_use_native_shape_not_config_image_size() -> None:
-    """Synthetic crops. Geometry follows the array, including sizes other than 128."""
-    spec = FeatureSpec.from_config({"data": {"image_size": 128}, "features": {}})
+@pytest.mark.parametrize("image_size", [128, 201, 366, "native", None])
+def test_features_use_native_shape_not_config_image_size(image_size: int | str | None) -> None:
+    """Synthetic crops. Geometry follows the array, not ``data.image_size``."""
+    config = load_config(Path(__file__).resolve().parents[1] / "config" / "config.yaml")
+    config["data"]["image_size"] = image_size
+    spec = FeatureSpec.from_config(config)
     spike = np.zeros((201, 173), dtype=np.float32)
     spike[100, 80] = 80.0
     features = extract_image_features(spike, spec)

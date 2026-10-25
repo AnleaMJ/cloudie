@@ -8,13 +8,23 @@ paths:
   manifest: data/manifest.csv
   artifacts: artifacts
   reports: reports
+  checkpoint_name: checkpoint.pt
 data:
-  # Deep models resize to this. Classical features keep native resolution.
-  image_size: 128
+  # null or native keeps each chip's height and width. NASA TorchGeo chips
+  # are 366x366 (Gurung et al. 2023). TCIR chips are 201x201. An integer
+  # resizes the deep model to that square. Classical features stay native.
+  image_size: native
   channels: 1
   normalize: zscore
   max_missing_fraction: 0.30
   plausible_wind_kt: [0, 200]
+  # NASA TropicalCyclone labels are HURDAT2 maximum sustained wind, a
+  # 1-minute average. Do not mix this with 10-minute winds.
+  wind_averaging: 1min
+  # Project bins for error tables. Not an IMD warning, and not the IMD
+  # 3-minute scale. IMD uses 3-minute winds. These edges are this project's
+  # own grouping: [17, 34) D_DD, [34, 48) CS, [48, 64) SCS, [64, 91) VSCS,
+  # and 91 kt and above ESCS_SUCS.
   imd5_edges_kt: [17, 34, 48, 64, 91]
   imd5_names: [D_DD, CS, SCS, VSCS, ESCS_SUCS]
 split:

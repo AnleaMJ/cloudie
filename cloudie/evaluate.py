@@ -14,15 +14,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from cloudie.config import load_config
+from cloudie.config import checkpoint_path as configured_checkpoint
+from cloudie.config import image_sizes_match, load_config, parse_image_size
 from cloudie.data_loader import load_manifest
 from cloudie.metrics import mean_baseline, metrics_by_class, regression_metrics
 from cloudie.preprocessing import NormStats
 from cloudie.sequences import stack_windows
 from cloudie.train import (
-    CHECKPOINT_NAME,
     NOT_A_FORECAST,
     SMOKE_BANNER,
+    assert_normalize,
     build_net,
     model_n_frames,
     project_labels,
@@ -96,16 +97,17 @@ def _predict(model, images: np.ndarray) -> np.ndarray:
 
 def evaluate(config: dict, checkpoint_path: str | Path | None = None) -> Evaluation:
     """Score the test split. Normalization stats come from the checkpoint."""
-    path = Path(checkpoint_path or Path(config["paths"]["artifacts"]) / CHECKPOINT_NAME)
+    path = Path(checkpoint_path) if checkpoint_path is not None else configured_checkpoint(config)
     if not path.is_file():
         raise FileNotFoundError(
             f"no checkpoint at {path}. Train first, or pass --checkpoint. "
             "A missing checkpoint is not a forecast."
         )
     payload = _load_torch_checkpoint(path)
-    if str(config["model"].get("name", "simple_cnn")) != str(payload["model_name"]):
+    assert_normalize(config)
+    if str(config["model"]["name"]) != str(payload["model_name"]):
         raise ValueError("config model.name does not match the checkpoint")
-    if int(config["data"]["image_size"]) != int(payload["image_size"]):
+    if not image_sizes_match(config["data"]["image_size"], payload["image_size"]):
         raise ValueError("config image_size does not match the checkpoint")
     manifest = Path(config["paths"]["manifest"])
     frame = load_manifest(manifest)
@@ -118,12 +120,12 @@ def evaluate(config: dict, checkpoint_path: str | Path | None = None) -> Evaluat
     )
     if stats.source_split != "train":
         raise ValueError("checkpoint normalization was not fit on train")
-    image_size = int(payload["image_size"])
+    image_size = parse_image_size(payload["image_size"])
     max_missing = float(payload["max_missing_fraction"])
     if uses_sequences(config):
-        if int(payload.get("n_frames", 1)) != model_n_frames(config):
+        if int(payload["n_frames"]) != model_n_frames(config):
             raise ValueError("config model.n_frames does not match the checkpoint")
-        if payload.get("hidden") is not None and int(config["model"].get("hidden", 16)) != int(
+        if payload.get("hidden") is not None and int(config["model"]["hidden"]) != int(
             payload["hidden"]
         ):
             raise ValueError("config model.hidden does not match the checkpoint")

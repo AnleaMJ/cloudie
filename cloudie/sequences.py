@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from cloudie.data_loader import load_image, resolve_image
-from cloudie.preprocessing import NormStats, leave_unflipped, prepare_image
+from cloudie.preprocessing import NormStats, leave_unflipped, prepare_image, stack_prepared
 
 N_FRAMES = 4
 SIZE_LABELS = ("r34_nmi", "rmw_nmi")
@@ -117,7 +117,7 @@ def stack_windows(
     frame: pd.DataFrame,
     manifest_path: str | Path,
     split_name: str,
-    image_size: int,
+    image_size: int | str | None,
     stats: NormStats | None,
     max_missing_fraction: float,
     n_frames: int = N_FRAMES,
@@ -151,7 +151,7 @@ def stack_windows(
                     max_missing_fraction,
                 )
             )
-        images.append(np.stack(frames, axis=0))
+        images.append(stack_prepared(frames))
         last = _row(indexed, sample_ids[-1])
         winds.append(float(last["wind_speed_kt"]))
         if "_class" in frame.columns and not pd.isna(last["_class"]):
@@ -162,7 +162,7 @@ def stack_windows(
             sizes.append([_pair(last, "r34_nmi"), _pair(last, "rmw_nmi")])
     size_array = np.asarray(sizes, dtype=np.float32) if use_size else None
     return (
-        np.stack(images, axis=0),
+        stack_prepared(images),
         np.asarray(winds, dtype=np.float32),
         labels,
         size_array,

@@ -21,14 +21,14 @@ from fastapi.responses import HTMLResponse
 from PIL import Image, UnidentifiedImageError
 
 from cloudie.app import CONFIDENCE_NOTE, PAGE_LEAD, SCALE_NOTE, example_frames
-from cloudie.config import load_config
+from cloudie.config import checkpoint_path, load_config
 from cloudie.imd_satellite import IMD_BUTTON, describe_frame, fetch_current_infrared
 from cloudie.predict import Prediction, category_span, predict_images
 from cloudie.schema import DEFAULT_EDGES_KT, DEFAULT_NAMES
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = "config/config.yaml"
-DEFAULT_CHECKPOINT = "artifacts/checkpoint.pt"
+DEFAULT_CHECKPOINT = checkpoint_path(load_config(ROOT / DEFAULT_CONFIG)).as_posix()
 NO_FRAME = "Add an infrared frame, then predict intensity."
 RUNTIME_BANNER = (
     "This deployment cannot load the model runtime. "

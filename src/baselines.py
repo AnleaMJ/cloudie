@@ -131,38 +131,45 @@ def xgboost_available() -> bool:
     return True
 
 
+_BASELINE_KEYS = (
+    "n_splits",
+    "seed",
+    "regression_models",
+    "classification_models",
+    "use_smote",
+    "ridge_alpha",
+    "knn_neighbors",
+    "svr_c",
+    "svc_c",
+    "rf_estimators",
+    "rf_max_depth",
+    "xgb_estimators",
+    "xgb_max_depth",
+    "xgb_learning_rate",
+    "max_iter",
+)
+
+
 def baseline_params(config: dict) -> dict:
-    defaults = {
-        "n_splits": 3,
-        "seed": 42,
-        "regression_models": ["mean", "ridge", "knn", "svr", "rf", "xgboost"],
-        "classification_models": ["most_frequent", "logreg", "knn", "svc", "rf", "xgboost"],
-        "use_smote": True,
-        "ridge_alpha": 1.0,
-        "knn_neighbors": 5,
-        "svr_c": 1.0,
-        "svc_c": 1.0,
-        "rf_estimators": 100,
-        "rf_max_depth": 6,
-        "xgb_estimators": 50,
-        "xgb_max_depth": 3,
-        "xgb_learning_rate": 0.1,
-        "max_iter": 500,
-    }
-    raw = dict(config.get("baselines") or {})
-    defaults.update(raw)
-    return defaults
+    """Hyperparameters from ``baselines`` in the YAML config. No fallbacks."""
+    raw = config.get("baselines")
+    if not isinstance(raw, dict):
+        raise KeyError("config baselines is required")
+    missing = [key for key in _BASELINE_KEYS if key not in raw]
+    if missing:
+        raise KeyError(f"config baselines missing {missing}")
+    return {key: raw[key] for key in _BASELINE_KEYS}
 
 
 def selection_params(config: dict) -> dict:
-    features = dict(config.get("features") or {})
-    raw = dict(features.get("selection") or {})
+    """Feature-selection hyperparameters from ``features.selection``."""
+    raw = config["features"]["selection"]
     return {
-        "correlation_threshold": float(raw.get("correlation_threshold", 0.95)),
-        "max_features": int(raw.get("max_features", 25)),
-        "method": str(raw.get("method", "correlation_rf")),
-        "n_estimators": int(raw.get("n_estimators", 40)),
-        "seed": int(raw.get("seed", baseline_params(config)["seed"])),
+        "correlation_threshold": float(raw["correlation_threshold"]),
+        "max_features": int(raw["max_features"]),
+        "method": str(raw["method"]),
+        "n_estimators": int(raw["n_estimators"]),
+        "seed": int(raw["seed"]),
     }
 
 
@@ -661,14 +668,14 @@ def run_from_config(
     destination = Path(out_dir) if out_dir else Path(config["paths"]["reports"]) / "baselines"
     frame = load_manifest(manifest)
     split_cfg = config["split"]
-    holdout_basin = split_cfg.get("holdout_basin") or None
+    holdout_basin = split_cfg["holdout_basin"] or None
     frame = assign_storms(
         frame,
         strategy=str(split_cfg["strategy"]),
-        test_fraction=float(split_cfg.get("test_fraction", 0.2)),
-        val_fraction=float(split_cfg.get("val_fraction", 0.2)),
-        seed=int(split_cfg.get("seed", 42)),
-        holdout_years=[int(year) for year in (split_cfg.get("holdout_years") or [])],
+        test_fraction=float(split_cfg["test_fraction"]),
+        val_fraction=float(split_cfg["val_fraction"]),
+        seed=int(split_cfg["seed"]),
+        holdout_years=[int(year) for year in (split_cfg["holdout_years"] or [])],
         holdout_basin=None if holdout_basin in {None, ""} else str(holdout_basin),
     )
     spec = FeatureSpec.from_config(config)
@@ -682,14 +689,14 @@ def extract_table(frame, manifest, spec: FeatureSpec, config: dict):
         frame,
         manifest,
         spec,
-        max_missing_fraction=float(config.get("data", {}).get("max_missing_fraction", 0.30)),
+        max_missing_fraction=float(config["data"]["max_missing_fraction"]),
     )
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("config/config_smoke.yaml"))
+    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, default=None)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()

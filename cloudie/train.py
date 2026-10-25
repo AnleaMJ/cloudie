@@ -19,9 +19,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from cloudie.config import load_config
+from cloudie.config import checkpoint_path, load_config, parse_image_size
 from cloudie.data_loader import load_image, load_manifest, resolve_image
-from cloudie.preprocessing import NormStats, fit_norm_stats, prepare_image
+from cloudie.preprocessing import NormStats, fit_norm_stats, prepare_image, stack_prepared
 from cloudie.schema import wind_to_imd5
 from cloudie.sequences import N_FRAMES, size_targets_present, stack_windows
 from cloudie.splits import (
@@ -41,9 +41,6 @@ NOT_A_FORECAST = (
     "This checkpoint is not a forecast or a warning. "
     "Agreement with a best track is not ground truth."
 )
-CHECKPOINT_NAME = "checkpoint.pt"
-
-
 class EarlyStopping:
     """Stop after ``patience`` validation checks without an improvement."""
 
@@ -117,25 +114,75 @@ def manifest_is_synthetic(frame: pd.DataFrame) -> bool:
     return bool(flags.any())
 
 
+_TRAIN_KEYS = (
+    "batch_size",
+    "epochs",
+    "lr",
+    "weight_decay",
+    "patience",
+    "class_loss_weight",
+    "size_loss_weight",
+)
+
+
 def _require_train_block(config: dict) -> dict:
     train_cfg = config.get("train")
-    if not isinstance(train_cfg, dict) or "patience" not in train_cfg:
-        raise ValueError("config train.patience is required")
+    if not isinstance(train_cfg, dict):
+        raise ValueError("config train is required")
+    missing = [key for key in _TRAIN_KEYS if key not in train_cfg]
+    if missing:
+        raise ValueError(f"config train missing {missing}")
     return train_cfg
+
+
+def assert_normalize(config: dict) -> None:
+    """The deep path standardizes with train-split mean and std."""
+    mode = config["data"]["normalize"]
+    if str(mode) != "zscore":
+        raise ValueError("data.normalize must be zscore")
+
+
+def recorded_wind_period(frame: pd.DataFrame) -> str | None:
+    """The single ``wind_averaging`` value on a manifest, if the column exists."""
+    if "wind_averaging" not in frame.columns:
+        return None
+    periods = sorted({str(value) for value in frame["wind_averaging"].dropna().unique()})
+    if len(periods) != 1:
+        return None
+    return periods[0]
+
+
+def assert_wind_averaging(config: dict, frame: pd.DataFrame) -> str | None:
+    """Require ``data.wind_averaging`` and refuse a manifest that disagrees.
+
+    A manifest with no period column does not inherit the config value.
+    Project class names stay off until the column records one period.
+    """
+    declared = config["data"]["wind_averaging"]
+    if declared is None or str(declared).strip() == "":
+        raise ValueError("config data.wind_averaging is required")
+    declared_text = str(declared)
+    observed = recorded_wind_period(frame)
+    if observed is not None and observed != declared_text:
+        raise ValueError(
+            f"manifest wind_averaging is {observed} but config data.wind_averaging "
+            f"is {declared_text}. Do not mix averaging periods."
+        )
+    return observed
 
 
 def split_frame(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
     split_cfg = config["split"]
-    holdout_years = split_cfg.get("holdout_years") or []
-    holdout_basin = split_cfg.get("holdout_basin") or None
+    holdout_years = split_cfg["holdout_years"] or []
+    holdout_basin = split_cfg["holdout_basin"] or None
     assigned = assign_storms(
         frame,
         str(split_cfg["strategy"]),
-        test_fraction=float(split_cfg.get("test_fraction", 0.2)),
-        val_fraction=float(split_cfg.get("val_fraction", 0.2)),
-        seed=int(split_cfg.get("seed", config["project"].get("seed", 0))),
+        test_fraction=float(split_cfg["test_fraction"]),
+        val_fraction=float(split_cfg["val_fraction"]),
+        seed=int(split_cfg["seed"]),
         holdout_years=[int(year) for year in holdout_years],
-        holdout_basin=None if holdout_basin in (None, "null") else str(holdout_basin),
+        holdout_basin=None if holdout_basin in (None, "null", "") else str(holdout_basin),
     )
     if "prev_sample_id" not in assigned.columns:
         assigned = add_previous_frame_id(assigned)
@@ -147,7 +194,7 @@ def stack_split(
     frame: pd.DataFrame,
     manifest_path: Path,
     split_name: str,
-    image_size: int,
+    image_size: int | str | None,
     stats: NormStats | None,
     max_missing_fraction: float,
 ) -> tuple[np.ndarray, np.ndarray, list[str | None]]:
@@ -163,7 +210,7 @@ def stack_split(
             prepare_image(load_image(path), image_size, stats, max_missing_fraction)
         )
         winds.append(float(row.wind_speed_kt))
-    return np.stack(images), np.asarray(winds, dtype=np.float32), labels
+    return stack_prepared(images), np.asarray(winds, dtype=np.float32), labels
 
 
 def _set_seed(seed: int) -> None:
@@ -180,7 +227,7 @@ def _torch():
 
 
 def uses_sequences(config: dict) -> bool:
-    return str(config["model"].get("name", "simple_cnn")) == "convlstm"
+    return str(config["model"]["name"]) == "convlstm"
 
 
 def train_size_head(frame: pd.DataFrame) -> bool:
@@ -192,7 +239,7 @@ def train_size_head(frame: pd.DataFrame) -> bool:
 def model_n_frames(config: dict) -> int:
     if not uses_sequences(config):
         return 1
-    requested = int(config["model"].get("n_frames", N_FRAMES))
+    requested = int(config["model"]["n_frames"])
     if requested != N_FRAMES:
         raise ValueError(f"ConvLSTM uses {N_FRAMES} frames")
     return requested
@@ -203,15 +250,15 @@ def build_backbone(config: dict):
     from cloudie.model import ConvLSTMRegressor, ResNetRegressor, SimpleCNN
 
     model_cfg = config["model"]
-    pretrained = bool(model_cfg.get("pretrained", False))
+    pretrained = bool(model_cfg["pretrained"])
     if pretrained and os.environ.get("CLOUDIE_ALLOW_PRETRAINED") != "1":
         raise RuntimeError(
             "pretrained: true downloads ImageNet weights and must not run in CI. "
             "Set CLOUDIE_ALLOW_PRETRAINED=1 only for a local run that intends the download."
         )
-    name = str(model_cfg.get("name", "simple_cnn"))
-    dropout = float(model_cfg.get("dropout", 0.3))
-    channels = int(config["data"].get("channels", 1))
+    name = str(model_cfg["name"])
+    dropout = float(model_cfg["dropout"])
+    channels = int(config["data"]["channels"])
     if name == "simple_cnn":
         return SimpleCNN(in_channels=channels, dropout=dropout)
     if name == "resnet18":
@@ -219,7 +266,7 @@ def build_backbone(config: dict):
     if name == "convlstm":
         return ConvLSTMRegressor(
             in_channels=channels,
-            hidden=int(model_cfg.get("hidden", 16)),
+            hidden=int(model_cfg["hidden"]),
             n_frames=model_n_frames(config),
             dropout=dropout,
         )
@@ -389,8 +436,8 @@ def _load_examples(
     stats: NormStats | None,
     size_head: bool,
 ):
-    image_size = int(config["data"]["image_size"])
-    max_missing = float(config["data"].get("max_missing_fraction", 0.30))
+    image_size = parse_image_size(config["data"]["image_size"])
+    max_missing = float(config["data"]["max_missing_fraction"])
     if uses_sequences(config):
         images, winds, labels, size = stack_windows(
             frame,
@@ -415,6 +462,7 @@ def fit_split_normalization(
     """Fit pixel mean and std on the train split only.
 
     The images are the train split. ``data.image_size`` comes from config.
+    ``native`` keeps each chip's height and width.
     A later held-out coverage check reuses ``storm_ids_by_split`` and these
     stored stats.
     """
@@ -436,21 +484,23 @@ def fit_split_normalization(
 
 
 def train(config: dict, manifest_path: str | Path | None = None) -> Path:
-    """Fit on the train split and write ``checkpoint.pt`` under ``paths.artifacts``."""
+    """Fit on the train split and write the checkpoint named in ``paths``."""
+    assert_model_inputs(("image",))
+    train_cfg = _require_train_block(config)
+    assert_normalize(config)
+    manifest = Path(manifest_path or config["paths"]["manifest"])
+    frame = load_manifest(manifest)
+    wind_period = assert_wind_averaging(config, frame)
     torch = _torch()
     from torch.utils.data import DataLoader
 
-    assert_model_inputs(("image",))
-    train_cfg = _require_train_block(config)
-    seed = int(config["project"].get("seed", 0))
+    seed = int(config["project"]["seed"])
     _set_seed(seed)
-    manifest = Path(manifest_path or config["paths"]["manifest"])
-    frame = load_manifest(manifest)
     synthetic = manifest_is_synthetic(frame)
     assigned = split_frame(frame, config)
     assigned["_class"] = project_labels(assigned, config)
-    image_size = int(config["data"]["image_size"])
-    max_missing = float(config["data"].get("max_missing_fraction", 0.30))
+    image_size = parse_image_size(config["data"]["image_size"])
+    max_missing = float(config["data"]["max_missing_fraction"])
     # Size labels are a training-fold decision, same as class weights.
     size_head = train_size_head(assigned)
     n_frames = model_n_frames(config)
@@ -465,7 +515,7 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
     sample_weight, class_weight_np = class_sample_weights(train_labels, known)
     # Validation uses weight 1. The class weights stay the train fold's.
     val_weight = np.ones(len(val_labels), dtype=np.float64)
-    batch_size = int(train_cfg.get("batch_size", 16))
+    batch_size = int(train_cfg["batch_size"])
     generator = torch.Generator()
     generator.manual_seed(seed)
     train_loader = DataLoader(
@@ -482,14 +532,14 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
     model = build_net(config, size_head=size_head)
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=float(train_cfg.get("lr", 1e-3)),
-        weight_decay=float(train_cfg.get("weight_decay", 0.0)),
+        lr=float(train_cfg["lr"]),
+        weight_decay=float(train_cfg["weight_decay"]),
     )
     class_weight = torch.tensor(class_weight_np, dtype=torch.float32)
-    class_loss_weight = float(train_cfg.get("class_loss_weight", 0.1))
-    size_loss_weight = float(train_cfg.get("size_loss_weight", 0.1)) if size_head else 0.0
+    class_loss_weight = float(train_cfg["class_loss_weight"])
+    size_loss_weight = float(train_cfg["size_loss_weight"]) if size_head else 0.0
     stopper = EarlyStopping(int(train_cfg["patience"]))
-    epochs = int(train_cfg.get("epochs", 1))
+    epochs = int(train_cfg["epochs"])
     last_epoch = 0
     for epoch in range(epochs):
         last_epoch = epoch
@@ -518,18 +568,14 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
     if stopper.best_state is None:
         raise RuntimeError("training produced no validation score")
     model.load_state_dict(stopper.best_state)
-    artifact_dir = Path(config["paths"]["artifacts"])
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint = artifact_dir / CHECKPOINT_NAME
-    periods = []
-    if "wind_averaging" in frame.columns:
-        periods = sorted({str(value) for value in frame["wind_averaging"].dropna().unique()})
+    checkpoint = checkpoint_path(config)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
-        "model_name": str(config["model"].get("name", "simple_cnn")),
-        "dropout": float(config["model"].get("dropout", 0.3)),
+        "model_name": str(config["model"]["name"]),
+        "dropout": float(config["model"]["dropout"]),
         "pretrained": False,
-        "in_channels": int(config["data"].get("channels", 1)),
+        "in_channels": int(config["data"]["channels"]),
         "n_classes": len(known),
         "class_names": known,
         "edges_kt": [float(edge) for edge in config["data"]["imd5_edges_kt"]],
@@ -546,12 +592,12 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
             )
         ),
         "is_synthetic": synthetic,
-        "wind_averaging": periods[0] if len(periods) == 1 else None,
+        "wind_averaging": wind_period,
         "split": {
             "strategy": str(config["split"]["strategy"]),
-            "seed": int(config["split"].get("seed", seed)),
-            "test_fraction": float(config["split"].get("test_fraction", 0.2)),
-            "val_fraction": float(config["split"].get("val_fraction", 0.2)),
+            "seed": int(config["split"]["seed"]),
+            "test_fraction": float(config["split"]["test_fraction"]),
+            "val_fraction": float(config["split"]["val_fraction"]),
         },
         "best_val_loss": stopper.best,
         "epoch": last_epoch,
@@ -559,7 +605,7 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
         "honesty": SMOKE_BANNER if synthetic else NOT_A_FORECAST,
         "n_frames": n_frames,
         "size_head": size_head,
-        "hidden": int(config["model"].get("hidden", 16)) if uses_sequences(config) else None,
+        "hidden": int(config["model"]["hidden"]) if uses_sequences(config) else None,
     }
     torch.save(payload, checkpoint)
     if synthetic:

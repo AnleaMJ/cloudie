@@ -39,8 +39,13 @@ def read_upload(upload) -> np.ndarray:
 
 
 def example_frames(root: Path = ROOT) -> list[Path]:
-    """Synthetic frames on disk, when a local smoke set exists."""
-    image_dir = root / "data" / "smoke" / "images"
+    """Synthetic frames next to the smoke manifest, when that set exists."""
+    from cloudie.config import load_config
+
+    manifest = Path(load_config(root / "config" / "config_smoke.yaml")["paths"]["manifest"])
+    if not manifest.is_absolute():
+        manifest = root / manifest
+    image_dir = manifest.parent / "images"
     if not image_dir.is_dir():
         return []
     return sorted(path for path in image_dir.glob("*.npy") if path.is_file())
@@ -94,7 +99,7 @@ def render_prediction(
 def main() -> None:
     import streamlit as st
 
-    from cloudie.config import load_config
+    from cloudie.config import checkpoint_path, load_config
     from cloudie.predict import missing_checkpoint, predict_images
     from cloudie.schema import DEFAULT_EDGES_KT, DEFAULT_NAMES
 
@@ -103,17 +108,21 @@ def main() -> None:
     st.header(PAGE_LEAD)
     st.caption(SCALE_NOTE)
 
+    default_config = ROOT / "config" / "config.yaml"
+    smoke_config = load_config(ROOT / "config" / "config_smoke.yaml")
+    smoke_checkpoint = checkpoint_path(smoke_config)
     with st.sidebar:
         st.header("Checkpoint")
-        config_path = st.text_input("Config", value=str(ROOT / "config" / "config.yaml"))
+        config_path = st.text_input("Config", value=str(default_config))
         checkpoint_text = st.text_input(
-            "Trained weights", value=str(ROOT / "artifacts" / "checkpoint.pt")
+            "Trained weights",
+            value=str(checkpoint_path(load_config(default_config), ROOT)),
         )
         previous_text = st.text_input("Last advisory wind (kt)", value="")
         st.caption("Optional. Used only to flag a jump or a category change.")
         st.caption(
             "A smoke check uses config/config_smoke.yaml and "
-            "artifacts/smoke/checkpoint.pt."
+            f"{smoke_checkpoint.as_posix()}."
         )
 
     checkpoint = Path(checkpoint_text)

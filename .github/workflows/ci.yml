@@ -10,7 +10,7 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt
       - run: pytest
-  # Deep-model tests. The job above does not install torch, so those tests skip there.
+  # One torch job. CPU wheels only. No NASA, TCIR, or TorchGeo download.
   torch:
     runs-on: ubuntu-latest
     steps:
@@ -20,12 +20,54 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt
       - run: pip install "torch>=2.1" "torchvision>=0.16" --index-url https://download.pytorch.org/whl/cpu
-      - run: pytest tests/test_model.py -o addopts= -ra --tb=short | tee pytest-model.txt
-      - name: Fail if model tests skipped
+      - run: pip install "streamlit>=1.33"
+      - name: Run model, sequence, training, and Streamlit tests
+        run: |
+          set -o pipefail
+          pytest tests/test_model.py tests/test_sequences.py tests/test_train.py tests/test_predict.py -o addopts= -ra --tb=short --junitxml=pytest-torch.xml | tee pytest-torch.txt
+      - name: Fail if any of these tests skipped
         run: |
           python - <<'PY'
-          import pathlib, re, sys
-          text = pathlib.Path("pytest-model.txt").read_text()
-          if re.search(r"\d+ skipped", text) or not re.search(r"\d+ passed", text):
-              sys.exit("model tests did not execute")
+          import sys
+          import xml.etree.ElementTree as ET
+          from collections import defaultdict
+
+          root = ET.parse("pytest-torch.xml").getroot()
+          rows = defaultdict(lambda: {"passed": 0, "skipped": 0, "failed": 0})
+          passed = skipped = failed = 0
+          for case in root.iter("testcase"):
+              classname = case.get("classname", "")
+              module = ".".join(classname.split(".")[:2])
+              rel = module.replace(".", "/") + ".py"
+              tags = {child.tag for child in list(case)}
+              if "skipped" in tags:
+                  rows[rel]["skipped"] += 1
+                  skipped += 1
+              elif "failure" in tags or "error" in tags:
+                  rows[rel]["failed"] += 1
+                  failed += 1
+              else:
+                  rows[rel]["passed"] += 1
+                  passed += 1
+          wanted = [
+              "tests/test_model.py",
+              "tests/test_sequences.py",
+              "tests/test_train.py",
+              "tests/test_predict.py",
+          ]
+          print(f"CI torch job: {passed} passed, {skipped} skipped, {failed} failed")
+          problems = []
+          for name in wanted:
+              row = rows[name]
+              print(
+                  f"{name}: {row['passed']} passed, {row['skipped']} skipped, {row['failed']} failed"
+              )
+              if row["passed"] + row["skipped"] + row["failed"] == 0:
+                  problems.append(f"{name} did not run")
+              if row["skipped"]:
+                  problems.append(f"{name} skipped {row['skipped']}")
+          if skipped or failed:
+              problems.append("torch job had skipped or failed tests")
+          if problems:
+              sys.exit("; ".join(problems))
           PY

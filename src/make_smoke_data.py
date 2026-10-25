@@ -123,9 +123,18 @@ def write_balanced_smoke(
     return _write_rows(root, rows)
 
 
+def _default_out() -> Path:
+    """Directory that holds ``paths.manifest`` in the smoke config."""
+    from src.config import load_config
+
+    root = Path(__file__).resolve().parents[1]
+    manifest = Path(load_config(root / "config" / "config_smoke.yaml")["paths"]["manifest"])
+    return manifest.parent
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, default=Path("data/smoke"))
+    parser.add_argument("--out", type=Path, default=_default_out())
     parser.add_argument(
         "--profile",
         choices=("span", "balanced"),
