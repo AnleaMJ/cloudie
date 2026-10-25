@@ -17,6 +17,7 @@ from cloudie.predict import (
     review_flags,
 )
 from cloudie.preprocessing import leave_unflipped, parse_image_size
+from cyclone_frames import spiral_frame
 
 ROOT = Path(__file__).resolve().parents[1]
 EDGES = (17.0, 34.0, 48.0, 64.0, 91.0)
@@ -76,6 +77,8 @@ def test_missing_checkpoint_has_no_number(tmp_path: Path) -> None:
     assert "no checkpoint" in text.lower()
     assert "not a forecast" in text.lower()
     assert "present_as_forecast: false" in text
+    assert "coastal" not in text.lower()
+    assert "operational" not in text.lower()
     assert not any(line.lower().startswith("forecast") for line in text.splitlines())
     again = predict_images(_config(), tmp_path / "missing.pt", [np.zeros((8, 8))])
     assert again.wind_kt is None
@@ -193,24 +196,36 @@ def test_smoke_checkpoint_is_not_a_forecast(tmp_path: Path) -> None:
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     _force_wind(payload["state_dict"], 40.0)
     torch.save(payload, checkpoint)
-    image = np.zeros((16, 16), dtype=np.float32)
+    image = spiral_frame(16)
     first = predict_images(config, checkpoint, [image], previous_advisory_kt=30.0)
     second = predict_images(config, checkpoint, [image], previous_advisory_kt=90.0)
     assert first.show_number is True
     assert first.present_as_forecast is False
     assert first.is_synthetic is True
+    assert first.wind_kt == pytest.approx(40.0)
     assert first.wind_kt == pytest.approx(second.wind_kt)
     assert first.confidence == pytest.approx(second.confidence)
-    assert first.category_label
+    assert first.category_label == "Cyclonic Storm"
     assert first.confidence is not None
     assert 0.0 <= first.confidence <= 1.0
     matched = dict(first.class_probabilities)
-    assert matched[first.category_label] == pytest.approx(first.confidence)
+    share = matched[first.category_label]
+    assert share == pytest.approx(1.0)
+    assert share > first.confidence
+    assert first.confidence_status == config["predict"]["confidence"]["uncalibrated_label"]
+    assert first.wind_kmh == pytest.approx(first.wind_kt * float(config["data"]["kt_to_kmh"]))
+    assert first.nearest_coastal_states is None
+    assert first.landfall_note is None
     assert sum(prob for _label, prob in first.class_probabilities) == pytest.approx(1.0)
     text = format_prediction(first)
     assert "wind speed (kt):" in text
+    assert "wind speed (km/h):" in text
     assert "intensity category:" in text
     assert "confidence:" in text
+    assert "uncalibrated" in text
+    assert "not an official IMD class" in text
+    assert config["predict"]["operational_disclaimer"] in text
+    assert f"{config['predict']['coastal_heading']}: null" in text
     assert "do not report" in text.lower()
     assert not any(line.lower().startswith("forecast") for line in text.splitlines())
 
@@ -235,9 +250,10 @@ def test_category_follows_predicted_wind_without_an_averaging_period(tmp_path: P
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     _force_wind(payload["state_dict"], 40.0)
     torch.save(payload, checkpoint)
-    image = np.ones((16, 16), dtype=np.float32)
+    image = spiral_frame(16)
     prediction = predict_images(config, checkpoint, [image], previous_advisory_kt=10.0)
-    assert prediction.category_label
+    assert prediction.wind_kt == pytest.approx(40.0)
+    assert prediction.category_label == "Cyclonic Storm"
     assert prediction.confidence is not None
     assert "category change" not in prediction.review
 
@@ -249,7 +265,7 @@ def test_display_counts_outside_training_have_no_wind(tmp_path: Path) -> None:
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     _force_wind(payload["state_dict"], 40.0)
     torch.save(payload, checkpoint)
-    image = np.full((16, 16), 80.0, dtype=np.float32)
+    image = spiral_frame(16) + 80.0
     prediction = predict_images(config, checkpoint, [image])
     text = format_prediction(prediction)
     assert prediction.show_number is False
@@ -269,7 +285,7 @@ def test_wind_above_200_kt_has_no_number(tmp_path: Path) -> None:
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     _force_wind(payload["state_dict"], 1644.7)
     torch.save(payload, checkpoint)
-    image = np.zeros((16, 16), dtype=np.float32)
+    image = spiral_frame(16)
     prediction = predict_images(config, checkpoint, [image])
     text = format_prediction(prediction)
     assert prediction.show_number is False

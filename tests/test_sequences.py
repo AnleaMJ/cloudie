@@ -195,6 +195,7 @@ def test_convlstm_shape_and_size_head_ignore_wind() -> None:
 def test_convlstm_checkpoint_needs_four_frames(tmp_path: Path) -> None:
     pytest.importorskip("torch")
     from cloudie.predict import predict_images
+    from cyclone_frames import spiral_frame
 
     config = load_config(ROOT / "config" / "config_smoke.yaml")
     config["data"]["image_size"] = 16
@@ -239,10 +240,11 @@ def test_convlstm_checkpoint_needs_four_frames(tmp_path: Path) -> None:
     }
     checkpoint = tmp_path / "checkpoint.pt"
     torch.save(payload, checkpoint)
-    image = np.ones((16, 16), dtype=np.float32)
-    short = predict_images(config, checkpoint, [image, image, image])
+    blank = np.ones((16, 16), dtype=np.float32)
+    short = predict_images(config, checkpoint, [blank, blank, blank])
     assert short.show_number is False
     assert short.wind_kt is None
+    image = spiral_frame(16)
     prediction = predict_images(
         config, checkpoint, [image, image, image, image], hemisphere="SH"
     )

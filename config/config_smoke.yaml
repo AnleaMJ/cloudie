@@ -9,6 +9,7 @@ paths:
   artifacts: artifacts/smoke
   reports: reports/smoke
   checkpoint_name: checkpoint.pt
+  run_records: artifacts/run_records
 data:
   # Small square so the software check stays fast. The NASA config uses native.
   image_size: 64
@@ -22,6 +23,12 @@ data:
   # 17/34/48/64/91 kt is this project's grouping, not that IMD scale.
   imd5_edges_kt: [17, 34, 48, 64, 91]
   imd5_names: [D_DD, CS, SCS, VSCS, ESCS_SUCS]
+  kt_to_kmh: 1.852
+  resize: letterbox
+  pad: median
+  grouping_note: >
+    Intensity category is this project's grouping on the configured knot bins.
+    It is not an official IMD class.
 split:
   strategy: storm_wise
   test_fraction: 0.2
@@ -46,6 +53,62 @@ train:
   size_loss_weight: 0.1
 predict:
   advisory_jump_kt: 20
+  operational_disclaimer: "This is not an operational forecast."
+  no_run_record_review: "no matching real-data run record"
+  no_run_record_refusal: >
+    This checkpoint has no matching real-data run record.
+    There is no model output. This is not a forecast.
+  landfall_note: "not a landfall forecast"
+  coast_reference_note: >
+    Reference points are approximate coastal coordinates, not a shoreline
+    survey and not a landfall forecast.
+  coastal_heading: "nearest Indian coastal states to the current position"
+  coastal_count: 3
+  earth_radius_km: 6371.0
+  latitude_keys: [latitude, lat]
+  longitude_keys: [longitude, lon]
+  training_mean_width: 3
+  scale_tolerance_kt: 1.0
+  sklearn_features: [symmetry, cold_concentration, wall_contrast, eye_contrast]
+  confidence:
+    uncalibrated_label: uncalibrated
+    coverage_label: "real-data coverage recorded"
+    gate_weight: 0.4
+    mc_weight: 0.4
+    interval_weight: 0.2
+    mc_std_scale_kt: 15
+    interval_scale_kt: 30
+  gate:
+    refusal: "not a tropical cyclone IR image"
+    grayscale_tolerance: 0.08
+    min_std: 0.02
+    min_symmetry: 0.45
+    min_cold_concentration: 0.36
+    cold_radius_fraction: 0.45
+    cold_tail_fraction: 0.25
+    eye_radius_fraction: 0.12
+    eyewall_outer_fraction: 0.32
+    outer_inner_fraction: 0.55
+    outer_outer_fraction: 0.95
+    min_wall_contrast: 0.45
+    radial_bins: 8
+    cold_value: auto
+    max_dropout_std_kt: 50
+    concentration_reference: 0.75
+  coast:
+    - {name: Gujarat, lat: 21.64, lon: 69.61}
+    - {name: Maharashtra, lat: 18.94, lon: 72.84}
+    - {name: Goa, lat: 15.49, lon: 73.83}
+    - {name: Karnataka, lat: 12.91, lon: 74.86}
+    - {name: Kerala, lat: 9.93, lon: 76.26}
+    - {name: Tamil Nadu, lat: 13.08, lon: 80.27}
+    - {name: Puducherry, lat: 11.94, lon: 79.83}
+    - {name: Andhra Pradesh, lat: 17.69, lon: 83.22}
+    - {name: Odisha, lat: 19.81, lon: 85.83}
+    - {name: West Bengal, lat: 21.63, lon: 87.51}
+    - {name: Andaman and Nicobar Islands, lat: 11.67, lon: 92.74}
+    - {name: Lakshadweep, lat: 10.57, lon: 72.64}
+    - {name: Dadra and Nagar Haveli and Daman and Diu, lat: 20.42, lon: 72.83}
 features:
   calibrated: false
   cold_thresholds: [200, 210, 220, 230, 240]
