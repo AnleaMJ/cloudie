@@ -14,6 +14,7 @@ import yaml
 from PIL import Image
 
 from src.baselines import baseline_params, fit_numeric_pipeline
+from src.config import load_config
 from src.evaluate import (
     BINNING_LABEL,
     assign_bins,
@@ -195,25 +196,19 @@ def test_persistence_uses_the_previous_wind_of_the_same_storm() -> None:
 
 
 def _config(size: int) -> dict:
-    return {
-        "project": {"seed": 0},
-        "paths": {"reports": "reports", "artifacts": "artifacts", "manifest": "manifest.csv"},
-        "data": {
-            "image_size": size,
-            "max_missing_fraction": 0.30,
-            "plausible_wind_kt": [0, 200],
-            "imd5_edges_kt": [17, 34, 48, 64, 91],
-            "imd5_names": ["D_DD", "CS", "SCS", "VSCS", "ESCS_SUCS"],
-        },
-        "model": {"name": "simple_cnn", "n_frames": 4},
-        "split": {
-            "strategy": "storm_wise",
-            "test_fraction": 0.2,
-            "val_fraction": 0.2,
-            "seed": 0,
-        },
-        "baselines": {"seed": 0, "ridge_alpha": 1.0},
-    }
+    """Synthetic held-out case built from ``config/config.yaml``.
+
+    ``baseline_params`` rejects a partial ``baselines`` block. The case
+    overrides chip size and seeds, and keeps a single-frame CNN so the
+    fixture images are not read as sequences.
+    """
+    config = load_config(ROOT / "config" / "config.yaml")
+    config["project"]["seed"] = 0
+    config["data"]["image_size"] = size
+    config["split"]["seed"] = 0
+    config["baselines"]["seed"] = 0
+    config["model"]["name"] = "simple_cnn"
+    return config
 
 
 def _write_image(root: Path, name: str, size: int, value: float) -> str:
