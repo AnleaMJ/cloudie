@@ -8,11 +8,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cloudie.config import load_config
-from cloudie.make_smoke_data import write_smoke
-from cloudie.preprocessing import prepare_image
 from cloudie.sequences import N_FRAMES, frame_windows, size_targets_present, stack_windows
-from cloudie.splits import null_cross_split_links
+from src.config import load_config
+from src.make_smoke_data import write_smoke
+from src.preprocessing import prepare_image
+from src.splits import null_cross_split_links
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -155,7 +155,7 @@ def test_targets_are_not_image_channels(tmp_path: Path) -> None:
 
 def test_convlstm_shape_and_size_head_ignore_wind() -> None:
     torch = pytest.importorskip("torch")
-    from cloudie.model import ConvLSTMRegressor
+    from src.model import ConvLSTMRegressor
     from cloudie.train import _size_loss, build_net
 
     model = ConvLSTMRegressor(hidden=8)

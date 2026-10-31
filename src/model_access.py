@@ -1,9 +1,8 @@
 """The only import point for the network and for MC-dropout.
 
-``cloudie.model.MCDropout`` is the class from the merged regressor work.
+``src.model.MCDropout`` is the class from the merged regressor work.
 ``cloudie.train.build_net`` wraps that module. This file does not copy
-either implementation. If the two trees are consolidated, change the
-imports here and leave the callers alone.
+either implementation.
 """
 
 from __future__ import annotations
@@ -14,8 +13,8 @@ class ModelAccess:
 
     @staticmethod
     def mc_dropout():
-        """Return ``cloudie.model.MCDropout``."""
-        from cloudie.model import MCDropout
+        """Return ``src.model.MCDropout``."""
+        from src.model import MCDropout
 
         return MCDropout
 

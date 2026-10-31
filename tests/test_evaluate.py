@@ -339,10 +339,9 @@ def test_train_storms_never_appear_in_the_evaluated_set(tmp_path: Path) -> None:
         out_dir=tmp_path / "reports",
         samples=samples,
     )
-    from cloudie.splits import storm_ids_by_split as cloudie_storm_ids
-    from src.splits import storm_ids_by_split as src_storm_ids
+    from src.splits import storm_ids_by_split
 
-    assert src_storm_ids(frame) == cloudie_storm_ids(frame)
+    assert storm_ids_by_split(frame)["test"] == frozenset(report["evaluated_storms"])
     evaluated = set(report["evaluated_storms"])
     train = set(report["train_storms"])
     assert evaluated.isdisjoint(train)

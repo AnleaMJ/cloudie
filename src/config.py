@@ -1,4 +1,4 @@
-"""YAML config loader. Training and baselines read hyperparameters from here."""
+"""YAML config loader. Training and baselines must read hyperparameters from here."""
 
 from __future__ import annotations
 

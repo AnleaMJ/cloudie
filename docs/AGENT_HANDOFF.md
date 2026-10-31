@@ -3,8 +3,17 @@
 Phase 2 lives in `src/`: features and classical baselines. Do not reimplement
 that table and do not restart the package under a new name.
 
-Phases 3–5 live in `cloudie/`. Do not copy them into `src/`. The deep-model
-import root is `cloudie`.
+Shared modules are canonical in `src/`. `cloudie/` re-exports them so older
+imports keep working: `config`, `data_loader`, `preprocessing`, `schema`,
+`splits`, `metrics`, `model`, `make_smoke_data`, and `inference`. The
+network classes (SimpleCNN, ResNet-18, ConvLSTM, MC-dropout) live in
+`src/model.py`.
+
+Training, checkpoint scoring, prediction, and the ConvLSTM window helper
+stay in `cloudie/`: `train.py`, `evaluate.py`, `predict.py`, `app.py`,
+`web.py`, `sequences.py`, and `imd_satellite.py`. Do not fold checkpoint
+scoring into `src/evaluate.py`, and do not copy the held-out scorer into
+`cloudie/evaluate.py`.
 
 Phase 3 is `cloudie/train.py` and `cloudie/evaluate.py`. Early stopping reads
 `train.patience`. Checkpoints go under `paths.artifacts` and are gitignored.
@@ -76,7 +85,7 @@ when the train split has no size labels.
   `storm_ids_by_split`. Mean and ridge reuse `src/baselines.py`. Persistence
   is the previous same-storm wind, not a feature. Normalization calls
   `fit_split_normalization` in `cloudie/train.py`. That helper is not defined
-  on the splits module; the duplicate split modules were left unchanged.
+  on the splits module. `cloudie/splits.py` re-exports `src/splits.py`.
   Do not copy this evaluator into `cloudie/evaluate.py`. Monte Carlo dropout
   coverage reads a sample array. This module does not import torch. A
   coverage gap larger than the tolerance is labeled `uncalibrated`.

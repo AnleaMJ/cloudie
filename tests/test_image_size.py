@@ -7,8 +7,8 @@ import importlib
 import numpy as np
 import pytest
 
-PREPROCESSORS = ("src.preprocessing", "cloudie.preprocessing")
-CONFIGS = ("src.config", "cloudie.config")
+PREPROCESSORS = ("src.preprocessing",)
+CONFIGS = ("src.config",)
 CHIP_SIZES = [128, 201, 366]
 
 

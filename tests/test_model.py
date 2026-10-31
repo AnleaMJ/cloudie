@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from cloudie.config import load_config, parse_image_size
+from src.config import load_config, parse_image_size
 
 ROOT = Path(__file__).resolve().parents[1]
 # 128 is a square resize, 201 is a TCIR chip, 366 is a NASA TorchGeo chip
@@ -97,7 +97,7 @@ def _watch_modes(model):
 
 
 def test_model_source_has_no_fixed_image_size() -> None:
-    source = (ROOT / "cloudie" / "model.py").read_text(encoding="utf-8")
+    source = (ROOT / "src" / "model.py").read_text(encoding="utf-8")
     assert "128" not in source
     assert "201" not in source
     assert "224" not in source
@@ -111,7 +111,7 @@ def test_forward_and_mc_dropout_at_each_native_size(config: dict, forbid_imagene
     from torch import nn
     from torch.nn.modules.batchnorm import _BatchNorm
 
-    from cloudie.model import MCDropout, ResNetRegressor, SimpleCNN, mc_dropout_predict
+    from src.model import MCDropout, ResNetRegressor, SimpleCNN, mc_dropout_predict
 
     channels = int(config["data"]["channels"])
     dropout = float(config["model"]["dropout"])
@@ -194,7 +194,7 @@ def test_forward_and_mc_dropout_at_each_native_size(config: dict, forbid_imagene
 def test_optional_class_head_shapes(config: dict, forbid_imagenet_download, image_size: int) -> None:
     torch = pytest.importorskip("torch")
 
-    from cloudie.model import MCDropout, OptionalClassHead, ResNetRegressor, SimpleCNN
+    from src.model import MCDropout, OptionalClassHead, ResNetRegressor, SimpleCNN
 
     n_classes = len(config["data"]["imd5_names"])
     assert n_classes >= 2
@@ -231,7 +231,7 @@ def test_resnet_conv1_accepts_three_channels_without_repeating(
 ) -> None:
     torch = pytest.importorskip("torch")
 
-    from cloudie.model import ResNetRegressor
+    from src.model import ResNetRegressor
 
     model = ResNetRegressor(
         in_channels=3, pretrained=False, dropout=float(config["model"]["dropout"])
@@ -254,7 +254,7 @@ def test_weights_none_does_not_download(config: dict, monkeypatch: pytest.Monkey
     pytest.importorskip("torchvision")
     from torchvision.models import resnet18 as real_resnet18
 
-    from cloudie.model import ResNetRegressor
+    from src.model import ResNetRegressor
 
     monkeypatch.setattr("torchvision.models._api.load_state_dict_from_url", _forbid_download)
     calls: dict[str, object] = {}
@@ -278,7 +278,7 @@ def test_pretrained_true_is_refused_without_download(monkeypatch: pytest.MonkeyP
     pytest.importorskip("torch")
     pytest.importorskip("torchvision")
 
-    from cloudie.model import ResNetRegressor
+    from src.model import ResNetRegressor
 
     monkeypatch.delenv("CLOUDIE_ALLOW_PRETRAINED", raising=False)
     monkeypatch.setattr("torchvision.models._api.load_state_dict_from_url", _forbid_download)
@@ -297,7 +297,7 @@ def test_pretrained_true_is_mockable(config: dict, monkeypatch: pytest.MonkeyPat
     from torchvision.models import ResNet18_Weights
     from torchvision.models import resnet18 as real_resnet18
 
-    from cloudie.model import ResNetRegressor
+    from src.model import ResNetRegressor
 
     monkeypatch.setenv("CLOUDIE_ALLOW_PRETRAINED", "1")
     monkeypatch.setattr("torchvision.models._api.load_state_dict_from_url", _forbid_download)
@@ -322,7 +322,7 @@ def test_pretrained_true_is_mockable(config: dict, monkeypatch: pytest.MonkeyPat
 def test_mc_dropout_rejects_a_single_pass() -> None:
     torch = pytest.importorskip("torch")
 
-    from cloudie.model import MCDropout, SimpleCNN
+    from src.model import MCDropout, SimpleCNN
 
     model = SimpleCNN(dropout=float(_config()["model"]["dropout"]))
     inputs = torch.zeros(1, int(_config()["data"]["channels"]), 8, 8)
@@ -334,7 +334,7 @@ def test_mc_dropout_rejects_a_single_pass() -> None:
 def test_convlstm_accepts_chip_sizes(config: dict, image_size: int) -> None:
     torch = pytest.importorskip("torch")
 
-    from cloudie.model import ConvLSTMRegressor
+    from src.model import ConvLSTMRegressor
 
     model = ConvLSTMRegressor(
         in_channels=int(config["data"]["channels"]),
@@ -363,3 +363,18 @@ def test_src_simple_cnn_accepts_chip_sizes(image_size: int) -> None:
     output = SimpleCNN()(torch.zeros(1, 1, image_size, image_size))
     assert tuple(output.shape) == (1, 1)
     assert torch.isfinite(output).all()
+
+
+def test_model_shim_reexports_the_same_objects() -> None:
+    pytest.importorskip("torch")
+    import importlib
+
+    canonical = importlib.import_module("src.model")
+    shim = importlib.import_module("cloudie.model")
+    compared = 0
+    for attr, value in vars(canonical).items():
+        if attr.startswith("_"):
+            continue
+        assert getattr(shim, attr) is value
+        compared += 1
+    assert compared > 0

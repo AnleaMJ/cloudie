@@ -13,7 +13,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cloudie.preprocessing import fit_norm_stats as cloudie_fit_norm_stats
 from cloudie.sequences import stack_windows
 from cloudie.train import (
     assert_model_inputs,
@@ -23,9 +22,9 @@ from cloudie.train import (
 )
 from src.baselines import run_baselines
 from src.features import FeatureSpec, extract_feature_table, model_matrix, select_features
-from src.preprocessing import fit_norm_stats as src_fit_norm_stats
+from src.preprocessing import fit_norm_stats
 
-SPLIT_MODULES = ("src.splits", "cloudie.splits")
+SPLIT_MODULES = ("src.splits",)
 IMAGE_SIZE = 8
 
 
@@ -164,7 +163,7 @@ def test_split_frame_nulls_cross_split_links_and_keeps_same_storm_links() -> Non
     assert cross.iloc[1]["prev_sample_id"] == "c0"
     assert cross.iloc[2]["prev_sample_id"] == "c1"
 
-    peek = _assign(_splits("cloudie.splits"), frame, "chronological")
+    peek = _assign(_splits("src.splits"), frame, "chronological")
     train_ids = peek.loc[peek["split"] == "train", "sample_id"].tolist()
     test_id = peek.loc[peek["split"] == "test", "sample_id"].iloc[0]
     assert len(train_ids) >= 2
@@ -221,7 +220,7 @@ def test_norm_stats_use_train_pixels_only(tmp_path: Path) -> None:
     stats = fit_split_normalization(frame, manifest, config)
     assert stats.source_split == "train"
     assert stats.mean == pytest.approx(2.0)
-    leaked = cloudie_fit_norm_stats(
+    leaked = fit_norm_stats(
         [np.full((1, IMAGE_SIZE, IMAGE_SIZE), value, dtype=np.float32) for value in (0.0, 4.0, 100.0)],
         "train",
     )
@@ -233,11 +232,10 @@ def test_norm_stats_use_train_pixels_only(tmp_path: Path) -> None:
     assert again.mean == pytest.approx(stats.mean)
     assert again.std == pytest.approx(stats.std)
 
-    for fit in (src_fit_norm_stats, cloudie_fit_norm_stats):
-        with pytest.raises(Exception, match="train split only"):
-            fit([np.zeros((1, IMAGE_SIZE, IMAGE_SIZE), dtype=np.float32)], "val")
-        with pytest.raises(Exception, match="train split only"):
-            fit([np.zeros((1, IMAGE_SIZE, IMAGE_SIZE), dtype=np.float32)], "test")
+    with pytest.raises(Exception, match="train split only"):
+        fit_norm_stats([np.zeros((1, IMAGE_SIZE, IMAGE_SIZE), dtype=np.float32)], "val")
+    with pytest.raises(Exception, match="train split only"):
+        fit_norm_stats([np.zeros((1, IMAGE_SIZE, IMAGE_SIZE), dtype=np.float32)], "test")
 
 
 def test_sequence_norm_stats_ignore_other_splits(tmp_path: Path) -> None:

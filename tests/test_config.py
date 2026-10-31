@@ -10,7 +10,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_NAMES = ("config.yaml", "config_smoke.yaml")
-LOADERS = ("src.config", "cloudie.config")
+LOADERS = ("src.config",)
 PROJECT_EDGES = [17.0, 34.0, 48.0, 64.0, 91.0]
 REQUIRED = {
     "project": ["name", "seed", "honesty"],
@@ -118,9 +118,9 @@ def test_configs_have_required_keys(loader: str, name: str) -> None:
 
 
 def test_nasa_config_keeps_native_chips_and_one_minute_winds() -> None:
-    from cloudie.config import checkpoint_path, parse_image_size
+    from src.config import checkpoint_path, parse_image_size
 
-    config = _load("cloudie.config", "config.yaml")
+    config = _load("src.config", "config.yaml")
     assert parse_image_size(config["data"]["image_size"]) is None
     assert config["data"]["wind_averaging"] == "1min"
     assert checkpoint_path(config) == Path("artifacts") / "checkpoint.pt"
@@ -138,11 +138,10 @@ def test_smoke_config_stays_small_and_synthetic() -> None:
     assert checkpoint_path(config) == Path("artifacts/smoke") / "checkpoint.pt"
 
 
-def test_project_edges_match_both_schema_copies() -> None:
-    for module_name in ("src.schema", "cloudie.schema"):
-        module = importlib.import_module(module_name)
-        assert list(module.DEFAULT_EDGES_KT) == PROJECT_EDGES
-        assert module.DEFAULT_NAMES == ("D_DD", "CS", "SCS", "VSCS", "ESCS_SUCS")
+def test_project_edges_match_the_schema() -> None:
+    module = importlib.import_module("src.schema")
+    assert list(module.DEFAULT_EDGES_KT) == PROJECT_EDGES
+    assert module.DEFAULT_NAMES == ("D_DD", "CS", "SCS", "VSCS", "ESCS_SUCS")
 
 
 def test_bins_are_documented_as_the_project_grouping() -> None:
@@ -152,7 +151,6 @@ def test_bins_are_documented_as_the_project_grouping() -> None:
         ROOT / "docs" / "PROJECT_DOCUMENTATION.md",
         ROOT / "docs" / "AGENT_HANDOFF.md",
         ROOT / "src" / "schema.py",
-        ROOT / "cloudie" / "schema.py",
         ROOT / "config" / "config.yaml",
         ROOT / "config" / "config_smoke.yaml",
     ]
