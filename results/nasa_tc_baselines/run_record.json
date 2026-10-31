@@ -1,0 +1,23 @@
+{
+  "baseline_seed": "42",
+  "command": "python -m src.baselines --config config/config.yaml --manifest data/nasa_tc/manifest.csv --out results/nasa_tc_baselines --workers 4 --feature-cache data/nasa_tc/feature_table.csv --manifest-command 'python -m src.nasa_tc --root data/torchgeo_tc --out data/nasa_tc/manifest.csv --reader csv'",
+  "dropped_cross_split_links": "0",
+  "feature_selection_seed": "42",
+  "manifest": "data/nasa_tc/manifest.csv",
+  "manifest_command": "python -m src.nasa_tc --root data/torchgeo_tc --out data/nasa_tc/manifest.csv --reader csv",
+  "modeling_split": "test:rows=23434,storms=128; train:rows=73035,storms=408; val:rows=18163,storms=102",
+  "official_split_used_for_training": "no",
+  "quote_as_result": "no",
+  "rows": "114632",
+  "rows_after_features": "114632",
+  "source_split": "test:rows=44377,storms=371; train:rows=70255,storms=494",
+  "split_seed": "42",
+  "split_strategy": "storm_wise",
+  "storms": "638",
+  "storms_after_features": "638",
+  "storms_on_both_source_sides": "227",
+  "test_fraction": "0.2",
+  "use_smote": "True",
+  "val_fraction": "0.2",
+  "workers": "4"
+}
