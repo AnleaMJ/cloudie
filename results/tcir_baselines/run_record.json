@@ -1,0 +1,21 @@
+{
+  "baseline_seed": "42",
+  "command": "python -m src.baselines --config config/config.yaml --manifest data/tcir/manifest.csv --out results/tcir_baselines --workers 4 --feature-cache data/tcir/feature_table.csv --manifest-command 'python -m src.tcir --h5 data/tcir_src/TCIR-ATLN_EPAC_WPAC.h5 data/tcir_src/TCIR-CPAC_IO_SH.h5 --out data/tcir/manifest.csv'",
+  "dropped_cross_split_links": "0",
+  "feature_selection_seed": "42",
+  "manifest": "data/tcir/manifest.csv",
+  "manifest_command": "python -m src.tcir --h5 data/tcir_src/TCIR-ATLN_EPAC_WPAC.h5 data/tcir_src/TCIR-CPAC_IO_SH.h5 --out data/tcir/manifest.csv",
+  "modeling_split": "test:rows=15810,storms=257; train:rows=42138,storms=822; val:rows=11919,storms=206",
+  "official_split_used_for_training": "no",
+  "quote_as_result": "no",
+  "rows": "69867",
+  "rows_after_features": "69867",
+  "split_seed": "42",
+  "split_strategy": "storm_wise",
+  "storms": "1285",
+  "storms_after_features": "1285",
+  "test_fraction": "0.2",
+  "use_smote": "True",
+  "val_fraction": "0.2",
+  "workers": "4"
+}

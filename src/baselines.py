@@ -11,8 +11,10 @@ only. It is not a license to tune on the locked test storms.
 
 SMOTE, when enabled, resamples the current training fold and never the
 validation rows. Otherwise those classifiers use class weights inside the
-fold. Regression does not use SMOTE. Persistence is the previous same-storm
-wind. It is not a feature and it is not fit. ADT, SATCON, and Dvorak columns
+fold. Regression does not use SMOTE. Persistence is a reference baseline:
+the previous frame's best-track label, not the imagery. It is not a feature
+and it is not fit. Image-only models cannot be compared against it.
+ADT, SATCON, and Dvorak columns
 are left empty until those products are actually joined.
 """
 
@@ -59,10 +61,17 @@ BANNER = (
     "The locked test split was not used for fitting, selection, or SMOTE. "
     "This is not a forecast or a warning."
 )
+PERSISTENCE_NOTE = (
+    "Persistence is a reference baseline. It uses the previous frame's "
+    "best-track label, not the imagery. Image-only models cannot be compared against it."
+)
+REFERENCE_ROLE = "reference_baseline"
+IMAGE_ROLE = "image_features"
 OPERATIONAL_COLUMNS = ("adt_mae_kt", "satcon_mae_kt", "dvorak_mae_kt")
 COMPARISON_COLUMNS = (
     "task",
     "model",
+    "role",
     "split_protocol",
     "inner_cv",
     "n_train_rows",
@@ -122,6 +131,7 @@ _MAJORITY_CLASSIFIERS = frozenset({"most_frequent", "mean"})
 _MARKDOWN_COLUMNS = (
     "task",
     "model",
+    "role",
     "n_train_rows",
     "n_val_rows",
     "n_train_storms",
@@ -467,6 +477,7 @@ def _empty_metric_row(task: str, model: str, note: str, synthetic: str, n_featur
         {
             "task": task,
             "model": model,
+            "role": REFERENCE_ROLE if model == "persistence" else IMAGE_ROLE,
             "split_protocol": "train_fit_val_score_test_locked",
             "inner_cv": "StratifiedGroupKFold",
             "n_features": n_features,
@@ -622,7 +633,7 @@ def write_comparison_files(
         BANNER,
         "",
         "Validation scores. The test split was not used for fitting, selection, or SMOTE.",
-        "Persistence is the previous same-storm wind, not a feature.",
+        PERSISTENCE_NOTE,
         "Learned models are sklearn pipelines. SMOTE and class weights stay inside the training fold.",
         "The official competition side, when present, stays in `source_split`.",
         "`quote_as_result` is no. This is not a forecast and not an operational-readiness claim.",
@@ -647,6 +658,7 @@ def write_comparison_files(
             "",
             "Official competition labels stay in `source_split`. The modeling split is storm-wise.",
             "The test split was not fit. `quote_as_result` is no.",
+            PERSISTENCE_NOTE,
             "",
         ]
         for key, value in metadata.items():
@@ -667,7 +679,10 @@ def _score_persistence(
 ) -> dict:
     """Score the previous same-storm wind. Nothing is fit and val storms stay out."""
     cv_mean, cv_std, cv_note = _persistence_cv(train, task, params)
-    note = f"previous_same_storm_wind;not_a_feature;no_pipeline;{cv_note}"
+    note = (
+        "reference_baseline;previous_best_track_label;not_imagery;"
+        f"previous_same_storm_wind;not_a_feature;no_pipeline;{cv_note}"
+    )
     row = _empty_metric_row(task, "persistence", note, synthetic, n_features)
     if task == "regression":
         train_pred = persistence_predictions(train)
@@ -1045,6 +1060,60 @@ def _cache_key(manifest: Path, config: dict) -> dict[str, object]:
     }
 
 
+def restrict_to_orig_size(
+    table: pd.DataFrame, manifest_path: str | Path, orig_size: int
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Keep rows whose manifest ``orig_size`` matches. The ``split`` column stays.
+
+    The storm assignment is not recomputed. Storms that have no frame of this
+    size drop out of the scored table; the returned note lists them.
+    """
+    raw = pd.read_csv(manifest_path, usecols=["sample_id", "orig_size"])
+    raw["sample_id"] = raw["sample_id"].astype(str)
+    sizes = raw.drop_duplicates("sample_id").set_index("sample_id")["orig_size"]
+    work = table.copy()
+    work["sample_id"] = work["sample_id"].astype(str)
+    if "split" not in work.columns:
+        raise BaselineDataError("orig_size filter needs the cached storm split")
+    parent_counts = {
+        name: {
+            "rows": int((work["split"].astype(str) == name).sum()),
+            "storms": int(work.loc[work["split"].astype(str) == name, "storm_id"].nunique()),
+        }
+        for name in ("train", "val", "test")
+    }
+    work["orig_size"] = pd.to_numeric(work["sample_id"].map(sizes), errors="coerce")
+    missing = int(work["orig_size"].isna().sum())
+    if missing:
+        raise BaselineDataError(f"{missing} feature rows have no orig_size on the manifest")
+    kept = work.loc[work["orig_size"].astype(int) == int(orig_size)].copy()
+    if kept.empty:
+        raise BaselineDataError(f"no rows with orig_size={orig_size}")
+    absent = {}
+    for name in ("train", "val", "test"):
+        parent = set(work.loc[work["split"].astype(str) == name, "storm_id"].astype(str))
+        scored = set(kept.loc[kept["split"].astype(str) == name, "storm_id"].astype(str))
+        absent[name] = sorted(parent - scored)
+    note = {
+        "orig_size_kept": str(int(orig_size)),
+        "parent_split": _count_block(work, "split"),
+        "scored_split": _count_block(kept, "split"),
+        "val_storms_in_parent_split": str(parent_counts["val"]["storms"]),
+        "val_storms_with_orig_size": str(
+            int(kept.loc[kept["split"].astype(str) == "val", "storm_id"].nunique())
+        ),
+        "val_storms_without_orig_size": str(len(absent["val"])),
+        "val_storm_ids_without_orig_size": ",".join(absent["val"]),
+        "like_for_like": (
+            f"Phase 1 CNN trains only on orig_size {int(orig_size)} frames. "
+            "This table keeps the storm split already stored on the feature cache "
+            "and scores only those frames. Persistence remains a reference baseline "
+            "that uses the previous best-track label, not the imagery."
+        ),
+    }
+    return kept, note
+
+
 def run_from_config(
     config_path: str | Path,
     manifest_path: str | Path | None = None,
@@ -1053,6 +1122,7 @@ def run_from_config(
     feature_cache: str | Path | None = None,
     command: str | None = None,
     manifest_command: str | None = None,
+    orig_size: int | None = None,
 ) -> BaselineReport:
     """Run the Phase 2 comparison. Does not download imagery.
 
@@ -1090,6 +1160,11 @@ def run_from_config(
                 encoding="utf-8",
             )
     logger.info("Dropped %s cross-split temporal links", dropped)
+    if orig_size is not None:
+        table, size_note = restrict_to_orig_size(table, manifest, int(orig_size))
+        logger.info("Kept orig_size %s: %s", orig_size, size_note["scored_split"])
+    else:
+        size_note = {}
     metadata = _run_metadata(
         frame,
         table,
@@ -1100,6 +1175,7 @@ def run_from_config(
         dropped=dropped,
         workers=workers,
     )
+    metadata.update(size_note)
     return run_baselines(table, spec.feature_names(), config, destination, metadata=metadata)
 
 
@@ -1126,6 +1202,12 @@ def main(argv: list[str] | None = None) -> None:
         default="",
         help="Exact command that built the manifest. Recorded in RUN.md. This command does not run it.",
     )
+    parser.add_argument(
+        "--orig-size",
+        type=int,
+        default=None,
+        help="Score only frames with this manifest orig_size. Keeps the cached storm split.",
+    )
     args = parser.parse_args(argv)
     command = "python -m src.baselines " + " ".join(shlex.quote(arg) for arg in (argv if argv is not None else sys.argv[1:]))
     report = run_from_config(
@@ -1136,6 +1218,7 @@ def main(argv: list[str] | None = None) -> None:
         feature_cache=args.feature_cache,
         command=command,
         manifest_command=args.manifest_command or None,
+        orig_size=args.orig_size,
     )
     print(BANNER)
     print(f"Wrote {report.out_dir / 'baseline_comparison.csv'}")

@@ -279,6 +279,8 @@ def test_smoke_images_run_the_configured_baselines(tmp_path: Path) -> None:
     assert persist["mae_kt"] == persist["mae_kt"]
     assert "not_a_feature" in persist["fit_notes"]
     assert "no_pipeline" in persist["fit_notes"]
+    assert "reference_baseline" in persist["fit_notes"]
+    assert persist["role"] == "reference_baseline"
     class_persist = classification[classification["model"] == "persistence"].iloc[0]
     assert class_persist["macro_f1"] == class_persist["macro_f1"]
     assert (tmp_path / "out" / "baseline_comparison.md").stat().st_size > 0
@@ -343,6 +345,11 @@ def test_protocol_persistence_matches_the_previous_row(tmp_path: Path) -> None:
     text = (tmp_path / "baseline_comparison.md").read_text(encoding="utf-8")
     assert "macro_f1" in text
     assert "not an operational-readiness claim" in text
+    assert "reference baseline" in text.lower()
+    assert "best-track" in text
+    assert "not the imagery" in text
+    run_note = (tmp_path / "RUN.md").read_text(encoding="utf-8") if (tmp_path / "RUN.md").is_file() else ""
+    assert "reference baseline" in text.lower()
     assert "quote_as_result" in text
 
 

@@ -9,9 +9,10 @@ module does not convert one averaging period into another.
 The evaluated storms are the test side of ``storm_ids_by_split``. Pixel
 normalization uses ``fit_split_normalization`` (defined on ``src.train``,
 which already calls the splits helper; ``cloudie.train`` re-exports it).
-Mean, ridge, and persistence reuse ``src.baselines``. Persistence is
-``src.baselines.persistence_predictions``: the previous wind inside the same
-storm, not a feature.
+Mean, ridge, and persistence reuse ``src.baselines``. Persistence is a
+reference baseline (``src.baselines.persistence_predictions``): the previous
+frame's best-track label, not the imagery. Image-only models cannot be
+compared against it.
 
 Monte Carlo dropout coverage reads a NumPy array of draws. This module does
 not import torch. Residual-quantile widths are fit on validation storms and
@@ -780,14 +781,15 @@ def evaluate(
             "mean_fit_notes": mean_note,
             "ridge_fit_notes": ridge_note,
             "persistence_definition": (
-                "previous wind_speed_kt in the same storm; "
-                "the first frame of a storm is not scored"
+                "reference baseline: previous best-track wind_speed_kt in the "
+                "same storm, not the imagery; image-only models cannot be "
+                "compared against it; the first frame of a storm is not scored"
             ),
             "mean": mean_block,
             "ridge": ridge_block,
             "persistence": persistence_block,
             "paired": {
-                "rows": "test rows with a previous wind in the same storm",
+                "rows": "test rows with a previous best-track wind in the same storm",
                 "model": paired_model,
                 "mean": paired_mean,
                 "ridge": paired_ridge,
