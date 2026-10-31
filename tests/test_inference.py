@@ -652,3 +652,72 @@ def test_real_torch_checkpoint_without_a_record_has_no_wind(tmp_path: Path) -> N
     assert prediction.wind_kt is None
     assert prediction.show_number is False
     assert "real-data run record" in prediction.banner
+
+
+def test_run_checkpoint_reads_artifacts_runs_and_withholds_wind_until_held_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real model is the directory ``paths.runs/<run_id>/``, not a loose file."""
+    from src.inference import NO_TRAINED_MODEL_BANNER, RunCheckpoint
+
+    monkeypatch.delenv("CLOUDIE_CHECKPOINT", raising=False)
+    monkeypatch.delenv("CLOUDIE_HF_MODEL_REPO", raising=False)
+    monkeypatch.delenv("CLOUDIE_RUN_ID", raising=False)
+    config = _config()
+    run_id = "nasa-check"
+    config["paths"]["runs"] = str(tmp_path / "runs")
+    config["paths"]["run_id"] = run_id
+    config["paths"]["checkpoint_name"] = "checkpoint.joblib"
+    config["paths"]["run_records"] = str(tmp_path / "unused")
+    directory = tmp_path / "runs" / run_id
+    weights = _joblib(
+        directory / "checkpoint.joblib",
+        config,
+        40.0,
+        is_synthetic=False,
+        run_id=run_id,
+        wind_averaging="1min",
+    )
+    metrics = {
+        "run_id": run_id,
+        "is_synthetic": False,
+        "result": True,
+        "dataset": "nasa",
+        "model": "simple_cnn",
+        "quote_as_result": "no",
+        "test": {"n": 4, "mae_kt": 1.0, "rmse_kt": 1.0, "bias_kt": 0.0},
+    }
+    (directory / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+    image = spiral_frame(32)
+    withheld = RunCheckpoint.estimate(config, [image], root=tmp_path)
+    assert withheld.wind_kt is None
+    assert "held-out" in withheld.banner
+
+    metrics["residual_quantiles"] = {
+        "eval_split": "test",
+        "fit_split": "val",
+        "test_storms": ["BOB01"],
+        "synthetic": "no",
+        "levels": {
+            "0.90": {
+                "nominal": 0.9,
+                "absolute_residual_quantile_kt": 12.0,
+                "n": 4,
+                "status": "within_tolerance",
+                "eval_split": "test",
+            }
+        },
+    }
+    (directory / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+    shown = RunCheckpoint.estimate(config, [image], root=tmp_path)
+    assert shown.outcome == "ok"
+    assert shown.wind_kt == pytest.approx(40.0)
+    assert shown.is_synthetic is False
+    assert weights.is_file()
+
+    colour = RunCheckpoint.estimate(config, [colour_enhanced(32)], path=weights, resolve=False)
+    assert colour.wind_kt is None
+    assert REFUSAL in colour.banner
+    from cloudie.app import NO_TRAINED_MODEL_BANNER as exported
+
+    assert exported is NO_TRAINED_MODEL_BANNER
