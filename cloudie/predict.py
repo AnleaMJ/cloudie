@@ -22,9 +22,8 @@ from pathlib import Path
 
 import numpy as np
 
-from cloudie.inference import IntensityEstimate
-from cloudie.schema import wind_to_imd5
-from cloudie.train import NOT_A_FORECAST, SMOKE_BANNER
+from src.inference import IntensityEstimate
+from src.schema import wind_to_imd5
 
 MISSING_CHECKPOINT_BANNER = (
     "No checkpoint was found. There is no model output. This is not a forecast."
@@ -200,6 +199,8 @@ def category_confidence(
 
 
 def _banner(payload: dict) -> str:
+    from cloudie.train import NOT_A_FORECAST, SMOKE_BANNER
+
     if bool(payload.get("is_synthetic")):
         return (
             SMOKE_BANNER
@@ -415,8 +416,8 @@ def format_prediction(prediction: Prediction) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from cloudie.config import load_config
-    from cloudie.data_loader import load_image
+    from src.config import load_config
+    from src.data_loader import load_image
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
