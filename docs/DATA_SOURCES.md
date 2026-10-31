@@ -31,6 +31,21 @@ Do not commit imagery or best-track dumps. CI must not download them.
   channels. Confirm satellite redistribution terms separately. Southern
   Hemisphere storms are not silently flipped. Phase 2 features use the
   first channel only.
+  `python -m src.tcir --h5 TCIR-ATLN_EPAC_WPAC.h5 TCIR-CPAC_IO_SH.h5`
+  reads only IR1 (channel index 0 in the README order IR1, WV, VIS, PMW),
+  keeps 201×201, and writes `ir1/<sample_id>.npy`, a manifest, and
+  `tcir_exclusions.csv`. The `info` table is a pandas 0.15 fixed frame
+  that current pandas cannot read, so the loader decodes it with h5py.
+  Labels: JTWC for WPAC, HURDAT2 for ATLN and EPAC (documented, 1-minute).
+  TCIR does not document CPAC, IO or SH; an IBTrACS v04r01 match shows they
+  equal the US agency 1-minute winds (JTWC for IO/SH, HURDAT2 for CPAC), so
+  those rows say `label_source_documented=false` and `*_inferred`.
+  `hemisphere` is recorded per row. `--flip-southern` is an opt-in
+  north-south mirror and sets `flipped`; the default is no flip. TCIR has
+  no official split in these files, so there is no `source_split`. The
+  2017 file `TCIR-ALL_2017.h5` is a separate year and is not loaded here.
+  ATLN and EPAC storms from 2003–2016 overlap NASA Tropical Storm storms;
+  map both to one storm key before splitting a combined manifest.
 - IBTrACS v4: https://doi.org/10.25921/82ty-9e16. Labels only.
 - INSAT-3D / 3DR: MOSDAC, registration required, not redistributed here.
   The intensity page reads the public Infrared-1 JPEG on
