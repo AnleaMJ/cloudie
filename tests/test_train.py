@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from cloudie.config import load_config
-from cloudie.splits import LeakageError
+from src.config import load_config
+from src.splits import LeakageError
 from cloudie.train import EarlyStopping, assert_model_inputs, class_sample_weights
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,7 +59,7 @@ def test_smoke_notebook_says_the_images_are_synthetic() -> None:
 
 
 def test_manifest_wind_period_must_match_config(tmp_path: Path) -> None:
-    from cloudie.make_smoke_data import write_smoke
+    from src.make_smoke_data import write_smoke
     from cloudie.train import train
 
     config = load_config(ROOT / "config" / "config_smoke.yaml")
@@ -98,7 +98,7 @@ def test_smoke_train_and_evaluate_are_not_a_forecast(
     pytest.importorskip("torch")
     pytest.importorskip("matplotlib")
     from cloudie.evaluate import evaluate
-    from cloudie.make_smoke_data import write_smoke
+    from src.make_smoke_data import write_smoke
     from cloudie.train import train
 
     chip = 16 if image_size == "native" else int(image_size)

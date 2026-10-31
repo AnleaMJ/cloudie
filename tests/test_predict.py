@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cloudie.config import load_config
+from src.config import load_config
 from cloudie.predict import (
     category_confidence,
     format_prediction,
@@ -16,7 +16,7 @@ from cloudie.predict import (
     predict_images,
     review_flags,
 )
-from cloudie.preprocessing import leave_unflipped, parse_image_size
+from src.preprocessing import leave_unflipped, parse_image_size
 from cyclone_frames import spiral_frame
 
 ROOT = Path(__file__).resolve().parents[1]

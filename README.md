@@ -4,9 +4,10 @@ Academic framework for estimating tropical-cyclone maximum sustained wind from
 infrared imagery. The primary task is regression in knots. Five project
 classes are an optional label for error tables, not an IMD warning.
 
-`src/` holds Phase 2: image features and classical baselines. `cloudie/`
-holds the deep path: Phase 3 training and evaluation, Phase 4 prediction,
-and a Phase 5 four-frame ConvLSTM. Size labels (R34, radius of maximum wind)
+`src/` is the canonical code: shared loaders and the deep-model classes, plus
+Phase 2 features, classical baselines, and held-out evaluation. `cloudie/`
+re-exports those modules and holds training, checkpoint evaluation,
+prediction, and the Streamlit page. Size labels (R34, radius of maximum wind)
 stay out of the inputs. A size head is fit only when those columns exist on
 the train split. No score in this repository is a scientific result.
 
@@ -157,8 +158,8 @@ operational DAV product.
 ## Layout
 
 ```
-src/                     Phase 2 features, classical baselines, held-out evaluation
-cloudie/                 deep path: train, evaluate, predict, ConvLSTM, Streamlit
+src/                     canonical modules, features, baselines, held-out evaluation
+cloudie/                 re-exports, plus train, checkpoint evaluate, predict, sequences
 config/                  config.yaml and config_smoke.yaml
 tests/                   pytest, using temporary smoke data
 docs/                    data sources, project notes, handoff

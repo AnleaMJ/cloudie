@@ -1,4 +1,8 @@
-"""Image checks, resize, train-only normalization, and train-only augmentation."""
+"""Image checks, resize, train-only normalization, and train-only augmentation.
+
+Southern Hemisphere frames stay as stored. ``leave_unflipped`` records a
+hemisphere label and does not mirror the array.
+"""
 
 from __future__ import annotations
 
@@ -116,6 +120,16 @@ def prepare_image(
 def dn_to_brightness_temperature(dn: np.ndarray, gain: float, offset: float) -> np.ndarray:
     """Apply a caller-supplied calibration. This does not look up a sensor table."""
     return np.asarray(dn, dtype=np.float32) * float(gain) + float(offset)
+
+
+def leave_unflipped(image: np.ndarray, hemisphere: str | None = None) -> np.ndarray:
+    """Use the frame as stored.
+
+    Southern Hemisphere TCIR imagery is not mirrored. ``hemisphere`` records
+    the caller's label and does not change the array.
+    """
+    del hemisphere
+    return np.asarray(image)
 
 
 def augment_image(image: np.ndarray, split: str, rng: np.random.Generator) -> np.ndarray:

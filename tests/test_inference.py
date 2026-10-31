@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cloudie.config import load_config
+from src.config import load_config
 from cloudie.inference import CycloneImageGate as CloudGate
 from cloudie.predict import format_prediction, predict_images
 from cyclone_frames import (
@@ -615,9 +615,11 @@ def test_scale_invariance_across_nasa_frame_sizes(tmp_path: Path) -> None:
 
 def test_model_access_points_at_the_merged_dropout_class() -> None:
     pytest.importorskip("torch")
-    from cloudie.model import MCDropout
+    from cloudie.model import MCDropout as shim_dropout
+    from src.model import MCDropout
 
     assert ModelAccess.mc_dropout() is MCDropout
+    assert shim_dropout is MCDropout
 
 
 def test_real_torch_checkpoint_without_a_record_has_no_wind(tmp_path: Path) -> None:

@@ -9,13 +9,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cloudie.preprocessing import prepare_image as prepare_cloudie_image
-from cloudie.schema import SchemaError as CloudieSchemaError
-from cloudie.schema import parse_is_synthetic as parse_cloudie_flag
-from cloudie.schema import require_valid as require_cloudie
 from src.baselines import _synthetic_flag
 from src.features import FeatureSpec, extract_feature_table
-from src.preprocessing import prepare_image as prepare_src_image
+from src.preprocessing import prepare_image
 from src.schema import REQUIRED_COLUMNS, SchemaError, parse_is_synthetic, require_valid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,7 +47,6 @@ def _pair(second: dict) -> pd.DataFrame:
 
 SCHEMAS = [
     pytest.param(require_valid, SchemaError, id="src"),
-    pytest.param(require_cloudie, CloudieSchemaError, id="cloudie"),
 ]
 
 
@@ -135,25 +130,22 @@ def test_parse_is_synthetic_does_not_treat_ambiguous_values_as_real() -> None:
     assert parse_is_synthetic("1.0") is True
     assert parse_is_synthetic(" yes ") is True
     assert parse_is_synthetic("false") is False
-    assert parse_cloudie_flag("false") is False
     for value in (None, float("nan"), "maybe", "", "synthetic"):
         with pytest.raises(SchemaError):
             parse_is_synthetic(value)
-        with pytest.raises(CloudieSchemaError):
-            parse_cloudie_flag(value)
 
 
 def test_manifest_flag_tracks_any_synthetic_row() -> None:
     from cloudie.train import manifest_is_synthetic, project_labels
 
     mixed = _pair({"is_synthetic": True})
-    validated = require_cloudie(mixed)
+    validated = require_valid(mixed)
     assert manifest_is_synthetic(validated) is True
     assert validated["is_synthetic"].tolist() == [False, True]
-    assert manifest_is_synthetic(require_cloudie(_frame(is_synthetic=False))) is False
-    with pytest.raises(CloudieSchemaError, match="is_synthetic"):
+    assert manifest_is_synthetic(require_valid(_frame(is_synthetic=False))) is False
+    with pytest.raises(SchemaError, match="is_synthetic"):
         manifest_is_synthetic(_frame().drop(columns=["is_synthetic"]))
-    with pytest.raises(CloudieSchemaError, match="is_synthetic"):
+    with pytest.raises(SchemaError, match="is_synthetic"):
         manifest_is_synthetic(_frame(is_synthetic=None))
     config = {
         "data": {
@@ -161,8 +153,8 @@ def test_manifest_flag_tracks_any_synthetic_row() -> None:
             "imd5_names": ["D_DD", "CS", "SCS", "VSCS", "ESCS_SUCS"],
         }
     }
-    assert project_labels(require_cloudie(_frame()), config) == ["CS"]
-    with pytest.raises(CloudieSchemaError, match="wind_averaging"):
+    assert project_labels(require_valid(_frame()), config) == ["CS"]
+    with pytest.raises(SchemaError, match="wind_averaging"):
         project_labels(_pair({"wind_averaging": "10-min"}), config)
 
 
@@ -194,53 +186,44 @@ def test_feature_table_keeps_a_string_false_flag(tmp_path: Path) -> None:
     assert "tb_mean" not in table.columns
 
 
-@pytest.mark.parametrize("prepare", [prepare_src_image, prepare_cloudie_image])
-def test_missing_pixel_fraction_above_0_30_raises(prepare) -> None:
+def test_missing_pixel_fraction_above_0_30_raises() -> None:
     image = np.zeros((10, 10), dtype=np.float32)
     image.ravel()[:30] = np.nan
-    prepared = prepare(image, 8, None, max_missing_fraction=0.30)
+    prepared = prepare_image(image, 8, None, max_missing_fraction=0.30)
     assert prepared.shape == (1, 8, 8)
     assert np.isfinite(prepared).all()
     image.ravel()[:31] = np.nan
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         with pytest.raises(ValueError, match="missing fraction"):
-            prepare(image, 8, None, max_missing_fraction=0.30)
+            prepare_image(image, 8, None, max_missing_fraction=0.30)
 
 
 def test_smoke_manifests_keep_the_synthetic_flag(tmp_path: Path) -> None:
-    from cloudie.data_loader import load_manifest as load_cloudie
-    from cloudie.make_smoke_data import write_smoke as write_cloudie_smoke
-    from src.data_loader import load_manifest as load_src
-    from src.make_smoke_data import write_smoke as write_src_smoke
+    from src.data_loader import load_manifest
+    from src.make_smoke_data import write_smoke
 
-    for writer, loader in (
-        (write_src_smoke, load_src),
-        (write_cloudie_smoke, load_cloudie),
-    ):
-        frame = loader(writer(tmp_path / writer.__module__))
-        assert set(REQUIRED_COLUMNS).issubset(frame.columns)
-        assert set(frame["wind_averaging"]) == {"synthetic"}
-        assert frame["is_synthetic"].dtype == bool
-        assert bool(frame["is_synthetic"].all())
-        assert not frame["sample_id"].duplicated().any()
+    frame = load_manifest(write_smoke(tmp_path / "smoke"))
+    assert set(REQUIRED_COLUMNS).issubset(frame.columns)
+    assert set(frame["wind_averaging"]) == {"synthetic"}
+    assert frame["is_synthetic"].dtype == bool
+    assert bool(frame["is_synthetic"].all())
+    assert not frame["sample_id"].duplicated().any()
 
 
 def test_schema_wording_matches_the_project_rules() -> None:
     for relative in (
         "src/schema.py",
-        "cloudie/schema.py",
         "README.md",
         "docs/PROJECT_DOCUMENTATION.md",
         "docs/DATA_SOURCES.md",
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert "not official IMD classes" in text
-    for relative in ("src/schema.py", "cloudie/schema.py"):
-        text = (ROOT / relative).read_text(encoding="utf-8")
-        assert "pixel stats" in text
-        assert "Raw digital numbers are not named" in text
-        assert "IMD associated maximum sustained wind" not in text
+    text = (ROOT / "src" / "schema.py").read_text(encoding="utf-8")
+    assert "pixel stats" in text
+    assert "Raw digital numbers are not named" in text
+    assert "IMD associated maximum sustained wind" not in text
     doc = (ROOT / "docs" / "PROJECT_DOCUMENTATION.md").read_text(encoding="utf-8")
     assert "Pixel stats" in doc
     assert "Raw digital numbers stay `pixel_*`" in doc

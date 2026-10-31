@@ -7,10 +7,9 @@ check. The intensity category is this project's grouping on the
 configured knot bins, not an official IMD class.
 
 The network is reached only through :class:`src.model_access.ModelAccess`.
-Letterboxing happens before ``cloudie.preprocessing.prepare_image``, which
-still resizes a square to the checkpoint size. ``src.preprocessing`` has
-no ``leave_unflipped``, so that call stays on the cloudie copy until the
-trees are consolidated.
+Letterboxing happens before ``src.preprocessing.prepare_image``, which
+resizes a square to the checkpoint size. Southern Hemisphere frames stay
+unflipped via ``src.preprocessing.leave_unflipped``.
 """
 
 from __future__ import annotations
@@ -934,13 +933,13 @@ class IntensityEstimate:
 
     @staticmethod
     def _unflipped(images: list[np.ndarray], hemisphere: str | None) -> list[np.ndarray]:
-        from cloudie.preprocessing import leave_unflipped
+        from src.preprocessing import leave_unflipped
 
         return [leave_unflipped(image, hemisphere) for image in images]
 
     @staticmethod
     def _missing_fraction(images: list[np.ndarray], limit: float) -> str | None:
-        from cloudie.preprocessing import as_channel_first, missing_fraction
+        from src.preprocessing import as_channel_first, missing_fraction
 
         for image in images:
             if missing_fraction(as_channel_first(image)) > limit:
@@ -956,7 +955,7 @@ class IntensityEstimate:
 
     @staticmethod
     def _prepare(config: dict, payload: dict, reports: list[GateReport]) -> list[np.ndarray]:
-        from cloudie.preprocessing import NormStats, prepare_image
+        from src.preprocessing import NormStats, prepare_image
 
         mode = FrameGeometry.mode(config)
         pad = str(_section(config, "data", "pad")).strip()
