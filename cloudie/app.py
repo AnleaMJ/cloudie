@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PAGE_LEAD = "Predict cyclone wind speed and intensity category from an infrared image."
 NO_TRAINED_MODEL_BANNER = (
     "No trained model yet. This page cannot produce estimates. "
-    "Not a forecast or warning system."
+    "Not a forecast or warning system. "
+    "Best-track labels are noisy, and no survey or smoke number is a result of this project."
 )
 CONFIDENCE_NOTE = (
     "Confidence mixes the image gate, dropout spread, and a residual-quantile "
