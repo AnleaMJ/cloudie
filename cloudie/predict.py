@@ -3,8 +3,10 @@
 The reported number is wind speed in knots. The intensity category is this
 project's grouping of that wind, not an official IMD class. Confidence mixes
 the image gate with dropout spread, and with residual quantiles when a
-checkpoint has them. It is uncalibrated unless a real-data coverage check
-was recorded. A missing checkpoint produces no number. A smoke checkpoint
+checkpoint has them. Evaluate residual quantiles are half-widths; the score
+uses the full width, twice that half-width. The label stays uncalibrated
+until a matching real-data run record has a coverage check or a held-out
+storm check. A missing checkpoint produces no number. A smoke checkpoint
 is a software check. This is not an operational forecast. A single frame
 cannot forecast landfall. Dropout standard deviation is not the displayed
 score and is not a calibrated prediction interval.

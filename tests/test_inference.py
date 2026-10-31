@@ -303,6 +303,177 @@ def test_confidence_mixes_only_the_terms_that_exist() -> None:
     )
 
 
+def test_evaluate_residual_quantiles_are_half_widths_and_stay_uncalibrated() -> None:
+    from src.evaluate import residual_quantile_coverage
+
+    config = _config()
+    val_truth = np.zeros(4)
+    val_pred = np.array([0.0, 2.0, 4.0, 10.0])
+    levels = residual_quantile_coverage(
+        val_truth, val_pred, val_truth, val_pred, levels=(0.8, 0.9), tolerance=0.05
+    )
+    half = float(levels["0.90"]["absolute_residual_quantile_kt"])
+    assert half >= float(levels["0.80"]["absolute_residual_quantile_kt"])
+    assert ConfidenceScore.interval_width(levels) == pytest.approx(2.0 * half)
+    nested = {
+        "uncertainty": {
+            "residual_quantile": {
+                "eval_split": "test",
+                "test_storms": [],
+                "levels": levels,
+            }
+        }
+    }
+    assert ConfidenceScore.interval_width(nested) == pytest.approx(2.0 * half)
+    assert ConfidenceScore.status(config, nested) == "uncalibrated"
+    width = 2.0 * half
+    scale = float(config["predict"]["confidence"]["interval_scale_kt"])
+    interval = float(np.clip(1.0 - width / scale, 0.0, 1.0))
+    expected = (0.4 * 1.0 + 0.2 * interval) / 0.6
+    assert ConfidenceScore.combine(config, 1.0, None, levels) == pytest.approx(expected)
+
+    quoted = {
+        "nominal": 0.9,
+        "absolute_residual_quantile_kt": 8.0,
+        "n": 5,
+        "status": "within_tolerance",
+        "eval_split": "test",
+    }
+    held_out = {
+        "residual_quantiles": {
+            "eval_split": "test",
+            "fit_split": "val",
+            "test_storms": ["BOB01"],
+            "synthetic": "no",
+            "levels": {
+                "0.80": {
+                    "nominal": 0.8,
+                    "absolute_residual_quantile_kt": 4.0,
+                    "n": 5,
+                    "status": "uncalibrated",
+                    "eval_split": "test",
+                },
+                "0.90": quoted,
+            },
+        }
+    }
+    assert ConfidenceScore.interval_width(held_out) == pytest.approx(16.0)
+    assert ConfidenceScore.status(config, held_out) == "real-data coverage recorded"
+    missed = {
+        "residual_quantiles": {
+            **held_out["residual_quantiles"],
+            "levels": {
+                "0.90": {**quoted, "status": "uncalibrated"},
+            },
+        }
+    }
+    assert ConfidenceScore.status(config, missed) == "uncalibrated"
+    assert ConfidenceScore.interval_width(missed) == pytest.approx(16.0)
+    smoke = {
+        "uncertainty": {
+            "residual_quantile": {
+                **held_out["residual_quantiles"],
+                "synthetic": "yes",
+                "test_storms": ["SMOKE"],
+            }
+        }
+    }
+    assert ConfidenceScore.status(config, smoke) == "uncalibrated"
+    assert "calibrated" not in ConfidenceScore.status(config, held_out)
+
+
+def test_predict_reuses_a_residual_quantile_half_width(tmp_path: Path) -> None:
+    config = _config()
+    image = spiral_frame(32)
+    levels = {
+        "0.90": {
+            "nominal": 0.9,
+            "absolute_residual_quantile_kt": 15.0,
+            "n": 4,
+            "status": "within_tolerance",
+            "eval_split": "test",
+        }
+    }
+    plain = _joblib(tmp_path / "plain.joblib", config, 40.0)
+    wide = _joblib(
+        tmp_path / "wide.joblib",
+        config,
+        40.0,
+        residual_quantiles={"levels": levels},
+    )
+    bare = predict_images(config, plain, [image])
+    scored = predict_images(config, wide, [image])
+    assert bare.show_number is True
+    assert scored.show_number is True
+    assert scored.confidence_status == "uncalibrated"
+    assert scored.confidence < bare.confidence
+    text = format_prediction(scored)
+    assert "(uncalibrated)" in text
+    assert "real-data coverage recorded" not in text
+
+    run_id = _record(
+        config,
+        tmp_path / "records",
+        coverage_check=None,
+        residual_quantiles={
+            "eval_split": "test",
+            "fit_split": "val",
+            "test_storms": ["BOB01"],
+            "synthetic": "no",
+            "levels": levels,
+        },
+    )
+    recorded_path = _joblib(
+        tmp_path / "recorded.joblib",
+        config,
+        40.0,
+        is_synthetic=False,
+        run_id=run_id,
+        residual_quantiles={"levels": levels},
+    )
+    recorded = predict_images(config, recorded_path, [image])
+    assert recorded.show_number is True
+    assert recorded.confidence_status == "real-data coverage recorded"
+    assert recorded.confidence == pytest.approx(scored.confidence)
+
+
+def test_native_image_size_matches_without_an_integer_cast(tmp_path: Path) -> None:
+    config = _config()
+    config["paths"]["run_records"] = str(tmp_path)
+    body = {
+        "run_id": "native-check",
+        "is_synthetic": False,
+        "data_kind": "real",
+        "model_name": "simple_cnn",
+        "image_size": "native",
+    }
+    (tmp_path / "native-check.json").write_text(json.dumps(body), encoding="utf-8")
+    matched, record = RunRecord.load_match(
+        config,
+        {"run_id": "native-check", "model_name": "simple_cnn", "image_size": None},
+    )
+    assert matched is True
+    assert record["image_size"] == "native"
+    assert RunRecord.load_match(
+        config,
+        {"run_id": "native-check", "model_name": "simple_cnn", "image_size": 16},
+    ) == (False, None)
+    payload = {
+        "model_name": "simple_cnn",
+        "image_size": None,
+        "norm_source_split": "train",
+    }
+    IntensityEstimate._check_identity(
+        {"model": {"name": "simple_cnn"}, "data": {"image_size": "native"}},
+        payload,
+    )
+    with pytest.raises(ValueError, match="image_size"):
+        IntensityEstimate._check_identity(
+            {"model": {"name": "simple_cnn"}, "data": {"image_size": 16}},
+            payload,
+        )
+
+
 def test_run_record_rejects_a_path_and_a_synthetic_file(tmp_path: Path) -> None:
     config = _config()
     payload = {"model_name": "simple_cnn", "image_size": 16, "run_id": "../secret"}
@@ -394,6 +565,9 @@ def test_scale_invariance_across_nasa_frame_sizes(tmp_path: Path) -> None:
     import torch
 
     config = _config()
+    # An untrained net can wander outside 0–200 kt. The seed keeps this a
+    # scale check rather than a draw of the initial weights.
+    torch.manual_seed(0)
     model = build_net(config, size_head=False)
     payload = {
         "state_dict": model.state_dict(),

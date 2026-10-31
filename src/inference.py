@@ -2,9 +2,9 @@
 
 This is not an operational forecast. A single infrared frame cannot
 forecast landfall. Confidence is uncalibrated unless a matching
-real-data run record includes a coverage check. The intensity category
-is this project's grouping on the configured knot bins, not an official
-IMD class.
+real-data run record includes a coverage check or a held-out storm
+check. The intensity category is this project's grouping on the
+configured knot bins, not an official IMD class.
 
 The network is reached only through :class:`src.model_access.ModelAccess`.
 Letterboxing happens before ``cloudie.preprocessing.prepare_image``, which
@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
+from src.config import image_sizes_match, parse_image_size
 from src.model_access import ModelAccess
 from src.schema import wind_to_imd5
 
@@ -401,12 +402,37 @@ class CycloneImageGate:
 class ConfidenceScore:
     """Gate score, dropout spread, and residual quantiles when a checkpoint has them.
 
-    The label stays uncalibrated unless a matching real-data run record
-    carries a coverage check. This is not a prediction interval.
+    ``src.evaluate`` stores a residual-quantile interval as the validation
+    quantile of ``|residual|``. That value is a half-width. The full width
+    used here is twice that half-width. A ``low_kt`` / ``high_kt`` pair is
+    the older full span and is used only when no evaluate levels are present.
+
+    The label stays ``uncalibrated`` unless a matching real-data run record
+    carries a coverage check or a held-out storm check whose quoted level
+    is ``within_tolerance``. This is not a prediction interval and it is
+    not an operational calibration claim.
     """
 
     @staticmethod
+    def source(payload: dict, record: dict | None):
+        """Quantile payload for the blend. The run record is the second choice."""
+        candidates = []
+        if isinstance(payload, dict):
+            candidates.append(payload.get("residual_quantiles"))
+            candidates.append(payload.get("uncertainty"))
+        if isinstance(record, dict):
+            candidates.append(record.get("residual_quantiles"))
+            candidates.append(record.get("uncertainty"))
+        for candidate in candidates:
+            if ConfidenceScore.interval_width(candidate) is not None:
+                return candidate
+        return None
+
+    @staticmethod
     def interval_width(raw) -> float | None:
+        half = ConfidenceScore._half_width(raw)
+        if half is not None:
+            return 2.0 * half
         if not isinstance(raw, dict) or "low_kt" not in raw or "high_kt" not in raw:
             return None
         low = _finite(raw["low_kt"], "residual_quantiles.low_kt")
@@ -414,6 +440,87 @@ class ConfidenceScore:
         if high < low:
             return None
         return high - low
+
+    @staticmethod
+    def _level_rows(raw) -> dict | None:
+        """Rows from ``report['uncertainty']['residual_quantile']['levels']``."""
+        if not isinstance(raw, dict):
+            return None
+        uncertainty = raw.get("uncertainty")
+        if isinstance(uncertainty, dict):
+            found = ConfidenceScore._level_rows(uncertainty.get("residual_quantile"))
+            if found:
+                return found
+        for key in ("residual_quantile", "residual_quantiles"):
+            nested = raw.get(key)
+            if isinstance(nested, dict):
+                found = ConfidenceScore._level_rows(nested)
+                if found:
+                    return found
+        levels = raw.get("levels")
+        if isinstance(levels, dict):
+            found = ConfidenceScore._level_rows(levels)
+            if found:
+                return found
+        rows = {
+            str(key): value
+            for key, value in raw.items()
+            if isinstance(value, dict) and "absolute_residual_quantile_kt" in value
+        }
+        return rows or None
+
+    @staticmethod
+    def _quantile_block(raw) -> dict | None:
+        """The evaluate residual-quantile object, including its storm lists."""
+        if not isinstance(raw, dict):
+            return None
+        uncertainty = raw.get("uncertainty")
+        if isinstance(uncertainty, dict):
+            found = ConfidenceScore._quantile_block(uncertainty)
+            if found is not None:
+                return found
+        for key in ("residual_quantile", "residual_quantiles"):
+            nested = raw.get(key)
+            if isinstance(nested, dict):
+                found = ConfidenceScore._quantile_block(nested)
+                if found is not None:
+                    return found
+        levels = raw.get("levels")
+        if isinstance(levels, dict) and ConfidenceScore._level_rows(levels):
+            return raw
+        if ConfidenceScore._level_rows(raw):
+            return raw
+        return None
+
+    @staticmethod
+    def _chosen_row(rows: dict) -> dict | None:
+        """Highest nominal level. That is the interval this score quotes."""
+        chosen = None
+        nominal = None
+        for row in rows.values():
+            if not isinstance(row, dict):
+                continue
+            try:
+                level = float(row.get("nominal", 0.0))
+                half = float(row["absolute_residual_quantile_kt"])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(level) or not math.isfinite(half) or half < 0:
+                continue
+            if nominal is None or level > nominal:
+                nominal = level
+                chosen = row
+        return chosen
+
+    @staticmethod
+    def _half_width(raw) -> float | None:
+        rows = ConfidenceScore._level_rows(raw)
+        if not rows:
+            return None
+        chosen = ConfidenceScore._chosen_row(rows)
+        if chosen is None:
+            return None
+        return float(chosen["absolute_residual_quantile_kt"])
 
     @staticmethod
     def combine(
@@ -454,18 +561,60 @@ class ConfidenceScore:
         recorded = str(cfg["coverage_label"]).strip()
         if not isinstance(record, dict):
             return uncalibrated
+        if ConfidenceScore._coverage_recorded(record):
+            return recorded
+        if ConfidenceScore._held_out_storm_check(record):
+            return recorded
+        return uncalibrated
+
+    @staticmethod
+    def _coverage_recorded(record: dict) -> bool:
         check = record.get("coverage_check")
         if not isinstance(check, dict) or check.get("real_data") is not True:
-            return uncalibrated
+            return False
         try:
             count = int(check["n"])
             nominal = float(check["nominal"])
             observed = float(check["observed"])
         except (KeyError, TypeError, ValueError):
-            return uncalibrated
-        if count < 1 or not math.isfinite(nominal) or not math.isfinite(observed):
-            return uncalibrated
-        return recorded
+            return False
+        return count >= 1 and math.isfinite(nominal) and math.isfinite(observed)
+
+    @staticmethod
+    def _held_out_storm_check(record: dict) -> bool:
+        """True when evaluate scored residual quantiles on held-out storms.
+
+        Half-widths alone do not count. The block has to name test storms,
+        the quoted level has to be ``within_tolerance``, and the report
+        must not be synthetic. The label is still the coverage label, not
+        ``calibrated``.
+        """
+        block = ConfidenceScore._quantile_block(record)
+        if not isinstance(block, dict):
+            return False
+        if str(block.get("eval_split", "")).strip() != "test":
+            return False
+        storms = block.get("test_storms")
+        if not isinstance(storms, (list, tuple)) or not storms:
+            return False
+        if not all(str(storm).strip() for storm in storms):
+            return False
+        synthetic = record.get("synthetic", block.get("synthetic"))
+        if synthetic in {"yes", "mixed", True}:
+            return False
+        rows = ConfidenceScore._level_rows(block)
+        if not rows:
+            return False
+        chosen = ConfidenceScore._chosen_row(rows)
+        if chosen is None or str(chosen.get("status", "")).strip() != "within_tolerance":
+            return False
+        if chosen.get("eval_split") not in (None, "test"):
+            return False
+        try:
+            count = int(float(chosen["n"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+        return count >= 1
 
 
 class IntensityGrouping:
@@ -512,7 +661,7 @@ class RunRecord:
             return False, None
         try:
             same_model = str(record.get("model_name")) == str(payload.get("model_name"))
-            same_size = int(record.get("image_size")) == int(payload.get("image_size"))
+            same_size = image_sizes_match(record.get("image_size"), payload.get("image_size"))
         except (TypeError, ValueError):
             return False, None
         if not same_model or not same_size:
@@ -734,9 +883,8 @@ class IntensityEstimate:
                 **ctx,
             )
         gate_score = min(report.score for report in reports)
-        confidence = ConfidenceScore.combine(
-            config, gate_score, std_kt, payload.get("residual_quantiles")
-        )
+        quantiles = ConfidenceScore.source(payload, record if matched else None)
+        confidence = ConfidenceScore.combine(config, gate_score, std_kt, quantiles)
         factor = _finite(_section(config, "data", "kt_to_kmh"), "data.kt_to_kmh")
         if factor <= 0:
             raise ValueError("config data.kt_to_kmh must be positive")
@@ -775,7 +923,7 @@ class IntensityEstimate:
     def _check_identity(config: dict, payload: dict) -> None:
         if str(config["model"].get("name", "simple_cnn")) != str(payload["model_name"]):
             raise ValueError("config model.name does not match the checkpoint")
-        if int(config["data"]["image_size"]) != int(payload["image_size"]):
+        if not image_sizes_match(config["data"]["image_size"], payload["image_size"]):
             raise ValueError("config image_size does not match the checkpoint")
         if payload.get("hidden") is not None and int(config["model"].get("hidden", 16)) != int(
             payload["hidden"]
@@ -817,7 +965,7 @@ class IntensityEstimate:
             std=float(payload["norm_std"]),
             source_split="train",
         )
-        image_size = int(payload["image_size"])
+        image_size = parse_image_size(payload["image_size"])
         limit = float(payload["max_missing_fraction"])
         prepared = []
         for report in reports:
