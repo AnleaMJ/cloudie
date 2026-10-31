@@ -10,7 +10,12 @@ paths:
   reports: reports/smoke
   checkpoint_name: checkpoint.pt
   run_records: artifacts/run_records
+  runs: artifacts/runs
+  nasa_root: data/nasa_tc
+  tcir_files: []
+  tcir_manifest_dir: data/tcir
 data:
+  dataset: smoke
   # Small square so the software check stays fast. The NASA config uses native.
   image_size: 64
   channels: 1
@@ -49,6 +54,8 @@ train:
   lr: 0.001
   weight_decay: 0.0001
   patience: 1
+  device: cpu
+  max_steps: null
   class_loss_weight: 0.1
   size_loss_weight: 0.1
 predict:

@@ -16,7 +16,9 @@ SHIMMED = (
     "metrics",
     "preprocessing",
     "schema",
+    "sequences",
     "splits",
+    "train",
 )
 
 

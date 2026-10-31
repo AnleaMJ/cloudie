@@ -7,8 +7,9 @@ report (for example ``1min`` for NASA) and mixed periods are refused. This
 module does not convert one averaging period into another.
 
 The evaluated storms are the test side of ``storm_ids_by_split``. Pixel
-normalization uses ``fit_split_normalization`` (defined on ``cloudie.train``,
-which already calls the splits helper). Mean and ridge reuse
+normalization uses ``fit_split_normalization`` (defined on ``src.train``,
+which already calls the splits helper; ``cloudie.train`` re-exports it).
+Mean and ridge reuse
 ``src.baselines``. Persistence is the previous wind inside the same storm.
 
 Monte Carlo dropout coverage reads a NumPy array of draws. This module does
@@ -384,7 +385,7 @@ def _require_finite_predictions(frame: pd.DataFrame, column: str, split_name: st
 
 def _train_norm_stats(frame: pd.DataFrame, manifest: str | Path, config: dict):
     """Fit train-only pixel stats through the existing helper."""
-    from cloudie.train import fit_split_normalization
+    from src.train import fit_split_normalization
 
     prepared = frame.copy()
     if "_class" not in prepared.columns:
@@ -799,7 +800,7 @@ def evaluate(
             "mean": float(stats.mean),
             "std": float(stats.std),
             "source_split": str(stats.source_split),
-            "helper": "cloudie.train.fit_split_normalization",
+            "helper": "src.train.fit_split_normalization",
         },
         "model": model_block,
         "baselines": {
