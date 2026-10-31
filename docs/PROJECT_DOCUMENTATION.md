@@ -44,9 +44,9 @@ ImageNet download. Southern Hemisphere frames are not flipped.
 storm split. MAE, RMSE, and bias are reported overall and inside our own
 grouping, IMD-style names, including VSCS and ESCS/SuCS. The report records
 `wind_averaging` and does not convert 1-minute NASA HURDAT2 winds into the
-3-minute winds used by IMD class definitions. Mean and ridge reuse
-`src/baselines.py` and are fit on train storms. Persistence is the previous
-wind in the same storm. Residual-quantile widths are fit on validation storms
+3-minute winds used by IMD class definitions. Mean, ridge, and persistence
+reuse `src/baselines.py`. Persistence is the previous wind in the same storm
+and is not a feature. Residual-quantile widths are fit on validation storms
 and checked on test storms. Monte Carlo dropout coverage reads stored samples
 and does not import torch. Intervals whose coverage misses the nominal level
 by more than the tolerance are labeled `uncalibrated`. The written files are

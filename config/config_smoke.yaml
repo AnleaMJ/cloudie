@@ -142,8 +142,8 @@ features:
 baselines:
   n_splits: 2
   seed: 7
-  regression_models: [mean, ridge, knn, svr, rf, xgboost]
-  classification_models: [most_frequent, logreg, knn, svc, rf, xgboost]
+  regression_models: [mean, persistence, ridge, lr, knn, rf, xgboost, svr]
+  classification_models: [mean, persistence, logreg, knn, rf, xgboost, svc]
   use_smote: true
   ridge_alpha: 1.0
   knn_neighbors: 3

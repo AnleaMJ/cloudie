@@ -9,8 +9,9 @@ module does not convert one averaging period into another.
 The evaluated storms are the test side of ``storm_ids_by_split``. Pixel
 normalization uses ``fit_split_normalization`` (defined on ``src.train``,
 which already calls the splits helper; ``cloudie.train`` re-exports it).
-Mean and ridge reuse
-``src.baselines``. Persistence is the previous wind inside the same storm.
+Mean, ridge, and persistence reuse ``src.baselines``. Persistence is
+``src.baselines.persistence_predictions``: the previous wind inside the same
+storm, not a feature.
 
 Monte Carlo dropout coverage reads a NumPy array of draws. This module does
 not import torch. Residual-quantile widths are fit on validation storms and
@@ -34,7 +35,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import numpy as np
 import pandas as pd
 
-from src.baselines import baseline_params, fit_numeric_pipeline
+from src.baselines import baseline_params, fit_numeric_pipeline, persistence_predictions
 from src.config import load_config
 from src.features import model_matrix
 from src.metrics import mean_baseline, metrics_by_class, regression_metrics
@@ -190,37 +191,6 @@ def score_winds(
         "highlight": _highlight(by_bin),
         "n_below_lowest_edge": below,
     }
-
-
-def persistence_predictions(frame: pd.DataFrame) -> np.ndarray:
-    """Previous ``wind_speed_kt`` inside the same storm.
-
-    Rows are ordered by ``timestamp`` when that column exists, otherwise by
-    the given row order. The first row of each storm is NaN. Wind from another
-    storm is never used. This is a baseline forecast, not a model feature.
-    """
-    if "storm_id" not in frame.columns or "wind_speed_kt" not in frame.columns:
-        raise ValueError("persistence needs storm_id and wind_speed_kt")
-    winds = pd.to_numeric(frame["wind_speed_kt"], errors="coerce").to_numpy(dtype=np.float64)
-    table = pd.DataFrame(
-        {
-            "storm_id": frame["storm_id"].astype(str).to_numpy(),
-            "wind": winds,
-            "row": np.arange(len(frame)),
-        }
-    )
-    if "timestamp" in frame.columns:
-        parsed = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True)
-        if bool(parsed.isna().any()):
-            table["order"] = frame["timestamp"].astype(str).to_numpy()
-        else:
-            table["order"] = parsed.to_numpy()
-    else:
-        table["order"] = table["row"]
-    table = table.sort_values(["storm_id", "order", "row"], kind="mergesort")
-    table["prediction"] = table.groupby("storm_id", sort=False)["wind"].shift(1)
-    table = table.sort_values("row", kind="mergesort")
-    return table["prediction"].to_numpy(dtype=np.float64)
 
 
 def mc_dropout_intervals(

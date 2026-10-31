@@ -525,3 +525,51 @@ def test_val_and_test_rows_do_not_influence_selection() -> None:
         seed=0,
     )
     assert decoy.names == ("f_decoy",)
+
+
+def test_feature_table_keeps_source_split_and_timestamp_order(tmp_path: Path) -> None:
+    image = np.full((16, 16), 40.0, dtype=np.float32)
+    np.save(tmp_path / "a.npy", image)
+    np.save(tmp_path / "b.npy", image)
+    frame = pd.DataFrame(
+        [
+            {
+                "sample_id": "a",
+                "image_path": "a.npy",
+                "storm_id": "s",
+                "split": "train",
+                "wind_speed_kt": 40.0,
+                "relative_time_s": 10,
+                "source_split": "test",
+                "timestamp": "2020-01-01T01:00:00Z",
+            },
+            {
+                "sample_id": "b",
+                "image_path": "b.npy",
+                "storm_id": "s",
+                "split": "train",
+                "wind_speed_kt": 45.0,
+                "relative_time_s": 0,
+                "source_split": "train",
+                "timestamp": "2020-01-01T00:00:00Z",
+            },
+        ]
+    )
+    single, dropped = extract_feature_table(frame, tmp_path / "manifest.csv", _spec(), workers=1)
+    pooled, _ = extract_feature_table(frame, tmp_path / "manifest.csv", _spec(), workers=2)
+    assert dropped == 0
+    by_id = single.set_index("sample_id")
+    assert by_id.loc["a", "source_split"] == "test"
+    assert by_id.loc["b", "source_split"] == "train"
+    assert by_id.loc["b", "has_prev"] == 0
+    assert by_id.loc["a", "has_prev"] == 1
+    names = [name for name in single.columns if name in _spec().feature_names()]
+    paired = pooled.set_index("sample_id")
+    for sample_id in ("a", "b"):
+        for name in names:
+            assert single.set_index("sample_id").loc[sample_id, name] == pytest.approx(
+                paired.loc[sample_id, name]
+            ) or (
+                np.isnan(single.set_index("sample_id").loc[sample_id, name])
+                and np.isnan(paired.loc[sample_id, name])
+            )

@@ -248,27 +248,38 @@ def assign_storms(
     return work
 
 
+def observation_order(frame: pd.DataFrame) -> pd.Series:
+    """Within-storm clock. Timestamp, else NASA ``relative_time_s``, else row order.
+
+    A missing value in the chosen clock falls back to row order so a partial
+    column cannot reorder the other rows. This is not a split.
+    """
+    if "timestamp" in frame.columns:
+        parsed = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True)
+        if not bool(parsed.isna().any()):
+            return pd.Series(parsed.to_numpy(), index=frame.index)
+        return frame["timestamp"].astype(str)
+    if "relative_time_s" in frame.columns:
+        values = pd.to_numeric(frame["relative_time_s"], errors="coerce")
+        if not bool(values.isna().any()):
+            return values
+    return pd.Series(np.arange(len(frame)), index=frame.index)
+
+
 def add_previous_frame_id(frame: pd.DataFrame) -> pd.DataFrame:
     """Attach the previous sample inside the same storm, ordered by time.
 
     The link is not yet split-safe. Call ``null_cross_split_links`` before
-    using it as a feature.
+    using it as a feature. NASA frames use ``relative_time_s`` when they
+    have no ``timestamp``.
     """
     if "storm_id" not in frame.columns or "sample_id" not in frame.columns:
         raise LeakageError("storm_id and sample_id are required")
     out = frame.copy()
     out["storm_id"] = out["storm_id"].astype(str)
     out["sample_id"] = out["sample_id"].astype(str)
-    if "timestamp" in out.columns:
-        parsed = pd.to_datetime(out["timestamp"], errors="coerce", utc=True)
-        if parsed.isna().any():
-            order_key = out["timestamp"].astype(str)
-        else:
-            order_key = parsed
-        out = out.assign(_order=order_key)
-        out = out.sort_values(["storm_id", "_order"], kind="mergesort")
-    else:
-        out = out.sort_values(["storm_id"], kind="mergesort")
+    out = out.assign(_order=observation_order(out))
+    out = out.sort_values(["storm_id", "_order"], kind="mergesort")
     out["prev_sample_id"] = out.groupby("storm_id", sort=False)["sample_id"].shift(1)
     out = out.drop(columns=["_order"], errors="ignore")
     return out.sort_index()
