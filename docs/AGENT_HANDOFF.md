@@ -96,7 +96,8 @@ when the train split has no size labels.
   ESCS/SuCS. It records `wind_averaging` and does not convert periods.
 - `src/evaluate.py` scores supplied predictions on the test storms from
   `storm_ids_by_split`. Mean, ridge, and persistence reuse `src/baselines.py`.
-  Persistence is the previous same-storm wind, not a feature. Normalization calls
+  Persistence is a reference baseline: the previous frame's best-track label,
+  not the imagery. Image-only models cannot be compared against it. Normalization calls
   `fit_split_normalization` in `src/train.py` (`cloudie/train.py` re-exports
   it). That helper is not defined on the splits module.
   `cloudie/splits.py` re-exports `src/splits.py`.

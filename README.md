@@ -55,8 +55,9 @@ Leak-free splits and quality gates (Phase 0–1), then classical baselines
 `python -m src.evaluate` scores a supplied prediction column on storm-held-out
 test rows. It reports MAE, RMSE, and bias overall and inside our own grouping,
 IMD-style names, and it always includes VSCS and ESCS/SuCS. Mean and ridge
-reuse the train-storm fits in `src/baselines.py`. Persistence is the previous
-wind in the same storm. `wind_averaging` is copied onto the report, for
+reuse the train-storm fits in `src/baselines.py`. Persistence is a reference
+baseline: the previous frame's best-track label, not the imagery. Image-only
+models cannot be compared against it. `wind_averaging` is copied onto the report, for
 example `1min` for NASA 1-minute HURDAT2 winds. IMD definitions use 3-minute
 winds, and the report does not convert between those periods. Residual-quantile
 widths are fit on validation storms. Monte Carlo dropout coverage reads a
