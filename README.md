@@ -65,12 +65,18 @@ tolerance is labeled `uncalibrated`. Files under `reports/` are software
 checks. `quote_as_result` stays `no`. This is not a forecast or an
 operational-readiness claim.
 
-The deep path is `cloudie/`:
+`python -m src.train` is the training entrypoint. The CPU dry run and the
+GPU command are in `docs/TRAINING.md`. A GPU run needs approval, and there
+are no results to quote.
+
+The deep path is `cloudie/` for checkpoint scoring, prediction, and the page.
+Training itself is `src/train.py`, re-exported by `cloudie/train.py`:
 
 - Phase 3 trains with early stopping from `train.patience`, writes a
   checkpoint under `artifacts/`, and compares the held-out storms with the
   train-set mean. The wind loss is weighted Smooth L1. The class loss is
-  auxiliary.
+  auxiliary. `python -m src.train` writes the run record under
+  `artifacts/runs/` and stops on validation MAE. Smoke runs are not results.
 - Phase 4 is `cloudie/predict.py` and `streamlit run cloudie/app.py`.
   The page reports wind speed in knots, the intensity category of that
   wind, and a confidence score: the share of model samples in that

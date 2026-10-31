@@ -12,7 +12,12 @@ paths:
   reports: reports
   checkpoint_name: checkpoint.pt
   run_records: artifacts/run_records
+  runs: artifacts/runs
+  nasa_root: data/nasa_tc
+  tcir_files: []
+  tcir_manifest_dir: data/tcir
 data:
+  dataset: nasa
   # null or native keeps each chip's height and width. NASA TorchGeo chips
   # are 366x366 (Gurung et al. 2023). TCIR chips are 201x201. An integer
   # resizes the deep model to that square. Classical features stay native.
@@ -59,6 +64,8 @@ train:
   lr: 0.001
   weight_decay: 0.0001
   patience: 5
+  device: cpu
+  max_steps: null
   class_loss_weight: 0.1
   # Applied only when r34_nmi and rmw_nmi exist on the train split.
   size_loss_weight: 0.1
