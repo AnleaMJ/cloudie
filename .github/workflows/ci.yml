@@ -73,3 +73,12 @@ jobs:
           if problems:
               sys.exit("; ".join(problems))
           PY
+      - run: pytest tests/test_inference.py tests/test_predict.py tests/test_sequences.py -o addopts= -ra --tb=short -k "not streamlit" | tee pytest-inference.txt
+      - name: Fail if inference tests skipped
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path("pytest-inference.txt").read_text()
+          if re.search(r"\d+ skipped", text) or not re.search(r"\d+ passed", text):
+              sys.exit("inference tests did not execute")
+          PY
