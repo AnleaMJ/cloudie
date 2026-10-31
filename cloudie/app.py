@@ -18,11 +18,28 @@ from cloudie.predict import Prediction, category_span
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGE_LEAD = "Predict cyclone wind speed and intensity category from an infrared image."
-CONFIDENCE_NOTE = "Confidence is the share of model samples in this intensity category, inside 0–200 kt."
+NO_TRAINED_MODEL_BANNER = (
+    "No trained model yet. This page cannot produce estimates. "
+    "Not a forecast or warning system."
+)
+CONFIDENCE_NOTE = (
+    "Confidence mixes the image gate, dropout spread, and a residual-quantile "
+    "width when one exists. It is uncalibrated until a held-out storm check exists. "
+    "It is not a forecast interval."
+)
 SCALE_NOTE = (
     "Reported winds stay between 0 and 200 kt: below depression, depression, "
-    "cyclonic storm, severe, very severe, and extremely severe or super cyclonic storm."
+    "cyclonic storm, severe, very severe, and extremely severe or super cyclonic storm. "
+    "Those names are this project's grouping, not an official IMD class."
 )
+GROUPING_LABEL = "Project grouping"
+
+
+def public_banner(text: str) -> str:
+    """Remove a server path appended after ``Path:``."""
+    marker = " Path: "
+    head, sep, _tail = text.partition(marker)
+    return head.rstrip() if sep else text
 
 
 def read_upload(upload) -> np.ndarray:
@@ -39,16 +56,27 @@ def read_upload(upload) -> np.ndarray:
 
 
 def example_frames(root: Path = ROOT) -> list[Path]:
-    """Synthetic frames next to the smoke manifest, when that set exists."""
+    """Bundled synthetic sample, then smoke frames when that set exists."""
     from cloudie.config import load_config
 
+    frames: list[Path] = []
+    bundled = root / "cloudie" / "samples" / "synthetic_ir.npy"
+    if bundled.is_file():
+        frames.append(bundled)
     manifest = Path(load_config(root / "config" / "config_smoke.yaml")["paths"]["manifest"])
     if not manifest.is_absolute():
         manifest = root / manifest
     image_dir = manifest.parent / "images"
-    if not image_dir.is_dir():
-        return []
-    return sorted(path for path in image_dir.glob("*.npy") if path.is_file())
+    if image_dir.is_dir():
+        names = {path.name for path in frames}
+        frames.extend(
+            sorted(
+                path
+                for path in image_dir.glob("*.npy")
+                if path.is_file() and path.name not in names
+            )
+        )
+    return frames
 
 
 def render_prediction(
@@ -60,22 +88,30 @@ def render_prediction(
     import streamlit as st
 
     if not prediction.show_number or prediction.wind_kt is None:
-        st.error(prediction.banner)
+        st.error(public_banner(prediction.banner))
+        st.metric("Wind interval", "—")
+        st.caption(prediction.confidence_status or "uncalibrated")
         return
     percent = (
         "—"
         if prediction.confidence is None
         else f"{prediction.confidence * 100:.0f}%"
     )
+    status = prediction.confidence_status or "uncalibrated"
     st.subheader(f"{prediction.wind_kt:.1f} kt · {prediction.category_label} · {percent}")
-    wind, category, confidence = st.columns(3)
+    wind, category, confidence, interval = st.columns(4)
     wind.metric("Wind speed", f"{prediction.wind_kt:.1f} kt")
-    category.metric("Intensity category", prediction.category_label or "—")
+    category.metric(GROUPING_LABEL, prediction.category_label or "—")
     confidence.metric("Confidence", percent)
+    interval.metric("Wind interval", "—")
+    st.caption(status)
+    if prediction.grouping_note:
+        st.caption(prediction.grouping_note)
     if edges is not None and names is not None:
         st.caption(
             f"{prediction.category_label} covers "
-            f"{category_span(prediction.project_class, edges, names)}."
+            f"{category_span(prediction.project_class, edges, names)}. "
+            "This is the project's grouping, not an official IMD class."
         )
     st.caption(CONFIDENCE_NOTE)
     if prediction.confidence is not None:
@@ -105,25 +141,32 @@ def main() -> None:
 
     st.set_page_config(page_title="Cloudie", layout="wide")
     st.title("Cloudie")
+    st.error(NO_TRAINED_MODEL_BANNER)
     st.header(PAGE_LEAD)
     st.caption(SCALE_NOTE)
 
     default_config = ROOT / "config" / "config.yaml"
-    smoke_config = load_config(ROOT / "config" / "config_smoke.yaml")
-    smoke_checkpoint = checkpoint_path(smoke_config)
+    loaded_default = load_config(default_config)
+    default_checkpoint = checkpoint_path(loaded_default, ROOT)
     with st.sidebar:
         st.header("Checkpoint")
-        config_path = st.text_input("Config", value=str(default_config))
-        checkpoint_text = st.text_input(
-            "Trained weights",
-            value=str(checkpoint_path(load_config(default_config), ROOT)),
-        )
+        show_paths = st.checkbox("Show config and weights", value=False)
+        if show_paths:
+            config_path = st.text_input("Config", value=str(default_config))
+            checkpoint_text = st.text_input(
+                "Trained weights",
+                value=str(default_checkpoint),
+            )
+            smoke_checkpoint = checkpoint_path(load_config(ROOT / "config" / "config_smoke.yaml"))
+            st.caption(
+                "A smoke check uses config/config_smoke.yaml and "
+                f"{smoke_checkpoint.as_posix()}."
+            )
+        else:
+            config_path = str(default_config)
+            checkpoint_text = str(default_checkpoint)
         previous_text = st.text_input("Last advisory wind (kt)", value="")
         st.caption("Optional. Used only to flag a jump or a category change.")
-        st.caption(
-            "A smoke check uses config/config_smoke.yaml and "
-            f"{smoke_checkpoint.as_posix()}."
-        )
 
     checkpoint = Path(checkpoint_text)
     if not checkpoint.is_file():
@@ -131,8 +174,9 @@ def main() -> None:
         st.info("Train a checkpoint, then point Trained weights at the .pt file.")
         return
 
-    pull = st.button(IMD_BUTTON, type="primary")
-    st.caption("Latest Infrared-1 image from the IMD satellite page.")
+    predict_clicked = st.button("Predict intensity", type="primary")
+    pull = st.button(IMD_BUTTON)
+    st.caption("Latest Infrared-1 image from the IMD satellite page. Predicting does not fetch it.")
     examples = example_frames()
     example_name = "(none)"
     if examples:
@@ -147,7 +191,6 @@ def main() -> None:
         accept_multiple_files=True,
         help="One infrared frame. Four frames, named in time order, when the checkpoint is the ConvLSTM.",
     )
-    predict_clicked = st.button("Predict intensity")
     has_example = example_name not in (None, "(none)")
 
     try:
