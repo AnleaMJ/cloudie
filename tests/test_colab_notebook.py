@@ -24,13 +24,24 @@ def test_colab_notebook_has_no_saved_results() -> None:
     for phrase in (
         "src.nasa_tc",
         "src.baselines",
-        "cloudie.train",
+        "python -m src.train",
+        "--dataset nasa",
+        "--dataset tcir",
+        "--model simplecnn",
+        "--model resnet18",
+        "--device cpu",
+        "--config config/config.yaml",
         "source_split",
         "storm-wise",
         "torchgeo",
         "cuda_visible_devices",
     ):
-        assert phrase in lowered
+        assert phrase in lowered, phrase
+    assert "cloudie.train" not in lowered
+    assert "--device cuda" not in lowered
+    assert "cloudie_allow_gpu=1" not in lowered
+    assert "for epoch" not in lowered
+    assert "optimizer.step" not in lowered
     assert "not an operational" in lowered or "not a forecast" in lowered
     assert "operationally ready" not in lowered
     assert "operational readiness" not in lowered or "not an operational-readiness" in lowered
