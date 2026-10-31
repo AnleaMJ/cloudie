@@ -29,7 +29,8 @@ from src.schema import wind_to_imd5
 # Shared with the web demo. cloudie.app re-exports these names.
 NO_TRAINED_MODEL_BANNER = (
     "No trained model yet. This page cannot produce estimates. "
-    "Not a forecast or warning system."
+    "Not a forecast or warning system. "
+    "Best-track labels are noisy, and no survey or smoke number is a result of this project."
 )
 PAGE_LEAD = "Predict cyclone wind speed and intensity category from an infrared image."
 CONFIDENCE_NOTE = (
