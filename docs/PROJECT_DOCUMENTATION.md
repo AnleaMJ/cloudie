@@ -59,6 +59,11 @@ category of that wind, and the share of model samples in that category.
 Pull current status from IMD reads the public Infrared-1 JPEG at request
 time and does not store it. Vercel serves that page from the repository-root
 `app.py`. `streamlit run cloudie/app.py` remains the local page.
+`space/app.py` is the Gradio Space. It imports `src` only. The banner
+constant lives in `src/inference.py` and `cloudie/app.py` re-exports it.
+`RunCheckpoint` reads `artifacts/runs/<run_id>/` or a Hub mirror of that
+run. `python space/sync_bundle.py` copies `src/`, `config/`, and the bundled
+sample. Torch stays off the Vercel import.
 A frame outside the checkpoint's infrared values, or a wind outside
 0–200 kt, produces no number and no confidence. A jump versus a last
 advisory and a project-class change are review notes.

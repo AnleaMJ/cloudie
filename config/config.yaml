@@ -16,6 +16,9 @@ paths:
   nasa_root: data/nasa_tc
   tcir_files: []
   tcir_manifest_dir: data/tcir
+  # Empty until a real run is published. CLOUDIE_RUN_ID and CLOUDIE_HF_MODEL_REPO override these.
+  run_id: null
+  hf_model_repo: null
 data:
   dataset: nasa
   # null or native keeps each chip's height and width. NASA TorchGeo chips
@@ -77,6 +80,9 @@ predict:
   no_run_record_refusal: >
     This checkpoint has no matching real-data run record.
     There is no model output. This is not a forecast.
+  held_out_refusal: >
+    This checkpoint's real-data run record has not passed the held-out
+    storm check. There is no model output. This is not a forecast.
   landfall_note: "not a landfall forecast"
   coast_reference_note: >
     Reference points are approximate coastal coordinates, not a shoreline
