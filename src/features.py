@@ -509,29 +509,51 @@ def _temporal_defaults(spec: FeatureSpec) -> dict[str, float]:
     }
 
 
+_CARRIED_COLUMNS = ("timestamp", "relative_time_s", "source_split")
+
+
+def _extract_path(task: tuple[str, FeatureSpec, float]) -> dict[str, float]:
+    """Load one image and return its feature dict. Used by the worker pool."""
+    path, spec, max_missing_fraction = task
+    return extract_image_features(load_image(path), spec, max_missing_fraction)
+
+
 def extract_feature_table(
     frame: pd.DataFrame,
     manifest_path: str,
     spec: FeatureSpec,
     max_missing_fraction: float = MAX_MISSING_FRACTION,
+    workers: int = 1,
 ) -> tuple[pd.DataFrame, int]:
     """Extract features and same-split temporal deltas.
 
-    Previous-frame ids are recomputed from ``storm_id`` and ``timestamp``,
-    then any link that crosses ``split`` is dropped before the delta is taken.
+    Previous-frame ids are recomputed from ``storm_id`` and the observation
+    clock (``timestamp``, else NASA ``relative_time_s``), then any link that
+    crosses ``split`` is dropped before the delta is taken. ``workers`` above
+    1 only parallelizes the per-image extract. It does not change the values.
     """
     if "split" not in frame.columns:
         raise LeakageError("feature extraction requires a split column")
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
     linked = add_previous_frame_id(frame)
     linked, dropped = null_cross_split_links(linked)
+    rows_in = linked.to_dict(orient="records")
+    tasks = [
+        (str(resolve_image(manifest_path, str(row["image_path"]))), spec, max_missing_fraction)
+        for row in rows_in
+    ]
+    if workers == 1:
+        extracted = [_extract_path(task) for task in tasks]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            extracted = list(pool.map(_extract_path, tasks))
     cache: dict[str, tuple[str, dict[str, float]]] = {}
     packed: list[tuple[dict[str, object], dict[str, float]]] = []
-    for row in linked.to_dict(orient="records"):
+    for row, image_features in zip(rows_in, extracted, strict=True):
         sample_id = str(row["sample_id"])
-        path = resolve_image(manifest_path, str(row["image_path"]))
-        image_features = extract_image_features(
-            load_image(path), spec, max_missing_fraction
-        )
         cache[sample_id] = (str(row["split"]), image_features)
         packed.append((row, image_features))
 
@@ -573,6 +595,9 @@ def extract_feature_table(
         }
         if "is_synthetic" in row:
             built["is_synthetic"] = parse_is_synthetic(row["is_synthetic"])
+        for column in _CARRIED_COLUMNS:
+            if column in row:
+                built[column] = row[column]
         built.update(image_features)
         built.update(temporal)
         rows.append(built)

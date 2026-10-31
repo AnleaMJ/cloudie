@@ -109,6 +109,27 @@ def test_strategies_keep_storms_whole_and_disjoint(module_name: str, strategy: s
 
 
 @pytest.mark.parametrize("module_name", SPLIT_MODULES)
+def test_previous_frame_follows_relative_time_when_there_is_no_timestamp(module_name: str) -> None:
+    module = _splits(module_name)
+    frame = pd.DataFrame(
+        {
+            "sample_id": ["b", "a", "c"],
+            "storm_id": ["s", "s", "s"],
+            "relative_time_s": [10, 0, 20],
+        }
+    )
+    linked = module.add_previous_frame_id(frame).set_index("sample_id")
+    assert pd.isna(linked.loc["a", "prev_sample_id"])
+    assert linked.loc["b", "prev_sample_id"] == "a"
+    assert linked.loc["c", "prev_sample_id"] == "b"
+    stamped = frame.assign(timestamp=["2020-01-01T03:00:00Z", "2020-01-01T00:00:00Z", "2020-01-01T01:00:00Z"])
+    by_stamp = module.add_previous_frame_id(stamped).set_index("sample_id")
+    assert pd.isna(by_stamp.loc["a", "prev_sample_id"])
+    assert by_stamp.loc["c", "prev_sample_id"] == "a"
+    assert by_stamp.loc["b", "prev_sample_id"] == "c"
+
+
+@pytest.mark.parametrize("module_name", SPLIT_MODULES)
 def test_random_splits_raise(module_name: str) -> None:
     module = _splits(module_name)
     frame = _boundary_frame()

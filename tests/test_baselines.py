@@ -9,10 +9,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from sklearn.linear_model import LinearRegression
+
 from src.baselines import (
     BaselineDataError,
     fit_numeric_pipeline,
+    frame_for_storm_split,
     iter_stratified_group_folds,
+    persistence_class_predictions,
+    persistence_predictions,
     resample_training_fold,
     run_baselines,
     xgboost_available,
@@ -265,5 +270,104 @@ def test_smoke_images_run_the_configured_baselines(tmp_path: Path) -> None:
         assert "xgboost" in set(regression["model"])
         assert "xgboost" in set(classification["model"])
     models = set(regression["model"])
-    for name in ("mean", "ridge", "knn", "svr", "rf"):
+    for name in ("mean", "persistence", "ridge", "lr", "knn", "svr", "rf"):
         assert name in models
+    classified = set(classification["model"])
+    for name in ("mean", "persistence", "logreg", "knn", "svc", "rf"):
+        assert name in classified
+    persist = regression[regression["model"] == "persistence"].iloc[0]
+    assert persist["mae_kt"] == persist["mae_kt"]
+    assert "not_a_feature" in persist["fit_notes"]
+    assert "no_pipeline" in persist["fit_notes"]
+    class_persist = classification[classification["model"] == "persistence"].iloc[0]
+    assert class_persist["macro_f1"] == class_persist["macro_f1"]
+    assert (tmp_path / "out" / "baseline_comparison.md").stat().st_size > 0
+    assert (tmp_path / "out" / "confusion_persistence.png").stat().st_size > 0
+    assert (tmp_path / "out" / "scatter_persistence.png").stat().st_size > 0
+
+
+def test_persistence_follows_relative_time_and_stays_inside_the_storm() -> None:
+    frame = pd.DataFrame(
+        {
+            "storm_id": ["s1", "s1", "s2", "s1"],
+            "wind_speed_kt": [30.0, 80.0, 10.0, 40.0],
+            "relative_time_s": [0, 20, 0, 10],
+        }
+    )
+    predicted = persistence_predictions(frame)
+    assert np.isnan(predicted[0])
+    assert predicted[1] == pytest.approx(40.0)
+    assert np.isnan(predicted[2])
+    assert predicted[3] == pytest.approx(30.0)
+    classes = persistence_class_predictions(frame)
+    assert classes[0] is None
+    assert classes[1] == "CS"
+    assert classes[3] == "D_DD"
+
+
+def test_linear_regression_is_a_pipeline(tmp_path: Path) -> None:
+    predicted, pipeline, note = fit_numeric_pipeline(
+        np.arange(8, dtype=float).reshape(4, 2),
+        np.array([1.0, 2.0, 3.0, 4.0]),
+        np.ones((2, 2)),
+        task="regression",
+        model_name="lr",
+        params=_params()["baselines"],
+        seed=0,
+        train_storms=["s"] * 4,
+        fitted_storms=set(),
+    )
+    assert note == "no_smote"
+    assert isinstance(pipeline.named_steps["model"], LinearRegression)
+    assert len(predicted) == 2
+    assert np.isfinite(predicted).all()
+
+
+def test_protocol_persistence_matches_the_previous_row(tmp_path: Path) -> None:
+    config = _params(
+        regression_models=["persistence"],
+        classification_models=["persistence"],
+    )
+    report = run_baselines(_protocol_frame(), ["f1", "f2"], config, tmp_path)
+    assert report.fitted_storms == frozenset()
+    assert report.fitted_storms.isdisjoint(report.val_storms | report.test_storms)
+    regression = report.comparison[
+        (report.comparison["task"] == "regression") & (report.comparison["model"] == "persistence")
+    ].iloc[0]
+    classification = report.comparison[
+        (report.comparison["task"] == "classification")
+        & (report.comparison["model"] == "persistence")
+    ].iloc[0]
+    assert regression["mae_kt"] == pytest.approx(0.1)
+    assert classification["macro_f1"] == pytest.approx(1.0)
+    text = (tmp_path / "baseline_comparison.md").read_text(encoding="utf-8")
+    assert "macro_f1" in text
+    assert "not an operational-readiness claim" in text
+    assert "quote_as_result" in text
+
+
+def test_official_side_is_not_the_modeling_split() -> None:
+    rows = []
+    for index, storm in enumerate(["a", "b", "c", "d", "e", "f"]):
+        rows.append(
+            {
+                "sample_id": storm,
+                "image_path": f"{storm}.npy",
+                "storm_id": storm,
+                "wind_speed_kt": 30.0 + index * 15.0,
+                "split": "train",
+                "source_split": "test" if index % 2 else "train",
+                "wind_averaging": "1min",
+                "is_synthetic": False,
+            }
+        )
+    frame = pd.DataFrame(rows)
+    config = load_config(ROOT / "config" / "config.yaml")
+    assigned = frame_for_storm_split(frame, config)
+    assert list(assigned["source_split"]) == [row["source_split"] for row in rows]
+    assert set(assigned["split"]) == {"train", "val", "test"}
+    assert not assigned["split"].eq("train").all()
+    refused = load_config(ROOT / "config" / "config.yaml")
+    refused["split"]["strategy"] = "chronological"
+    with pytest.raises(BaselineDataError, match="storm-wise"):
+        frame_for_storm_split(frame, refused)
