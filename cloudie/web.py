@@ -1,7 +1,8 @@
 """ASGI page for the Vercel Python runtime.
 
 The repository-root ``app.py`` exposes ``app``. ``streamlit run cloudie/app.py``
-remains the local page. This module does not import torch. A missing
+remains the local page. Canonical helpers come from ``src``. This module
+does not import torch. A missing
 checkpoint returns before the model runtime is loaded. The public
 Infrared-1 JPEG is fetched only when the satellite button is used, and it
 is not stored.
@@ -33,10 +34,10 @@ from cloudie.app import (
     example_frames,
     public_banner,
 )
-from cloudie.config import checkpoint_path, load_config
 from cloudie.imd_satellite import IMD_BUTTON, describe_frame, fetch_current_infrared
 from cloudie.predict import Prediction, category_span, predict_images
-from cloudie.schema import DEFAULT_EDGES_KT, DEFAULT_NAMES
+from src.config import checkpoint_path, load_config
+from src.schema import DEFAULT_EDGES_KT, DEFAULT_NAMES
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = "config/config.yaml"

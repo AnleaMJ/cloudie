@@ -57,7 +57,7 @@ def read_upload(upload) -> np.ndarray:
 
 def example_frames(root: Path = ROOT) -> list[Path]:
     """Bundled synthetic sample, then smoke frames when that set exists."""
-    from cloudie.config import load_config
+    from src.config import load_config
 
     frames: list[Path] = []
     bundled = root / "cloudie" / "samples" / "synthetic_ir.npy"
@@ -135,9 +135,9 @@ def render_prediction(
 def main() -> None:
     import streamlit as st
 
-    from cloudie.config import checkpoint_path, load_config
     from cloudie.predict import missing_checkpoint, predict_images
-    from cloudie.schema import DEFAULT_EDGES_KT, DEFAULT_NAMES
+    from src.config import checkpoint_path, load_config
+    from src.schema import DEFAULT_EDGES_KT, DEFAULT_NAMES
 
     st.set_page_config(page_title="Cloudie", layout="wide")
     st.title("Cloudie")
