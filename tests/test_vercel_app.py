@@ -63,6 +63,25 @@ def test_home_page_names_the_scale_and_the_imd_button(client: TestClient) -> Non
     assert "uncalibrated" in response.text
 
 
+def test_default_page_hides_config_and_weights(client: TestClient) -> None:
+    home = client.get("/")
+    opened = client.get("/run")
+    posted = client.post(
+        "/run",
+        data={"action": "score", "example": "synthetic_ir.npy", "previous": ""},
+    )
+    for response in (home, opened, posted):
+        assert response.status_code == 200
+        assert 'name="config"' not in response.text
+        assert 'name="checkpoint"' not in response.text
+        assert "Trained weights" not in response.text
+    debug = client.get("/?debug=1")
+    assert debug.status_code == 200
+    assert 'name="config"' in debug.text
+    assert 'name="checkpoint"' in debug.text
+    assert "Trained weights" in debug.text
+
+
 def test_get_run_shows_the_banner(client: TestClient) -> None:
     from cloudie.app import NO_TRAINED_MODEL_BANNER
 
