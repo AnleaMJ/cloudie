@@ -14,3 +14,4 @@ reports/*
 *.ckpt
 *.h5
 .streamlit/secrets.toml
+space/bundle/

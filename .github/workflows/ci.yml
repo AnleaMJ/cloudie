@@ -24,13 +24,13 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt
       - run: pip install "torch>=2.1" "torchvision>=0.16" --index-url https://download.pytorch.org/whl/cpu
-      - run: pip install "streamlit>=1.33"
+      - run: pip install "streamlit>=1.33" "gradio==6.31.0"
       # h5py only so the TCIR training test can read a tiny local fixture.
       - run: pip install "h5py>=3.9"
-      - name: Run model, sequence, training, and Streamlit tests
+      - name: Run model, sequence, training, Streamlit, and Space tests
         run: |
           set -o pipefail
-          pytest tests/test_model.py tests/test_sequences.py tests/test_train.py tests/test_predict.py -o addopts= -ra --tb=short --junitxml=pytest-torch.xml | tee pytest-torch.txt
+          pytest tests/test_model.py tests/test_sequences.py tests/test_train.py tests/test_predict.py tests/test_space_app.py -o addopts= -ra --tb=short --junitxml=pytest-torch.xml | tee pytest-torch.txt
       - name: Fail if any of these tests skipped
         run: |
           python - <<'PY'
@@ -60,6 +60,7 @@ jobs:
               "tests/test_sequences.py",
               "tests/test_train.py",
               "tests/test_predict.py",
+              "tests/test_space_app.py",
           ]
           print(f"CI torch job: {passed} passed, {skipped} skipped, {failed} failed")
           problems = []

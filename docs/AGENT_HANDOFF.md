@@ -19,6 +19,15 @@ held-out scorer into `cloudie/evaluate.py`. Commands are in
 `docs/TRAINING.md`. A GPU run needs misty wind's approval. No results exist
 yet.
 
+The Hugging Face Space is `space/`. It imports only from `src/`, including
+`NO_TRAINED_MODEL_BANNER` and `RunCheckpoint` in `src/inference.py`.
+`cloudie/app.py` re-exports that banner. Do not paste the banner sentence
+into `space/`, and do not copy the gate into `space/`. A later checkpoint
+is loaded from `artifacts/runs/<run_id>/` or from a Hub repo that mirrors
+that run directory. `python space/sync_bundle.py` copies `src/`, `config/`,
+and the bundled sample. Hardware is CPU basic. The Space is not a forecast.
+No weights are shipped.
+
 Phase 3 is `cloudie/train.py` and `cloudie/evaluate.py`. Early stopping reads
 `train.patience`. Checkpoints go under `paths.artifacts` and are gitignored.
 The loss is weighted Smooth L1 on wind, with an auxiliary class loss weighted
