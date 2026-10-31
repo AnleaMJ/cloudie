@@ -168,9 +168,10 @@ def test_bins_are_documented_as_the_project_grouping() -> None:
 
 
 def test_training_code_does_not_keep_hyperparameter_fallbacks() -> None:
-    train = (ROOT / "cloudie" / "train.py").read_text(encoding="utf-8")
-    for snippet in ("1e-3", 'get("batch_size"', 'get("epochs"', 'get("lr"', "checkpoint.pt"):
-        assert snippet not in train
+    for relative in ("src/train.py", "cloudie/train.py"):
+        train = (ROOT / relative).read_text(encoding="utf-8")
+        for snippet in ("1e-3", 'get("batch_size"', 'get("epochs"', 'get("lr"', "checkpoint.pt"):
+            assert snippet not in train, relative
     baselines = (ROOT / "src" / "baselines.py").read_text(encoding="utf-8")
     assert '"rf_estimators": 100' not in baselines
     assert '"xgb_estimators": 50' not in baselines

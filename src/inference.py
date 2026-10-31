@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,24 @@ import numpy as np
 from src.config import image_sizes_match, parse_image_size
 from src.model_access import ModelAccess
 from src.schema import wind_to_imd5
+
+# Shared with the web demo. cloudie.app re-exports these names.
+NO_TRAINED_MODEL_BANNER = (
+    "No trained model yet. This page cannot produce estimates. "
+    "Not a forecast or warning system."
+)
+PAGE_LEAD = "Predict cyclone wind speed and intensity category from an infrared image."
+CONFIDENCE_NOTE = (
+    "Confidence mixes the image gate, dropout spread, and a residual-quantile "
+    "width when one exists. It is uncalibrated until a held-out storm check exists. "
+    "It is not a forecast interval."
+)
+SCALE_NOTE = (
+    "Reported winds stay between 0 and 200 kt: below depression, depression, "
+    "cyclonic storm, severe, very severe, and extremely severe or super cyclonic storm. "
+    "Those names are this project's grouping, not an official IMD class."
+)
+GROUPING_LABEL = "Project grouping"
 
 
 def _section(config: dict, *keys: str):
@@ -643,29 +662,88 @@ class RunRecord:
         run_id = str(run_id)
         if "/" in run_id or "\\" in run_id or ".." in run_id:
             return False, None
-        path = Path(_section(config, "paths", "run_records")) / f"{run_id}.json"
-        if not path.is_file():
+        record = RunRecord._legacy_record(config, run_id)
+        if record is None:
+            record = RunRecord._run_directory_record(config, run_id)
+        if record is None:
+            record = RunRecord._active_directory_record(config, run_id)
+        if record is None:
+            return False, None
+        normalized = RunRecord._normalize(record, payload)
+        if str(normalized.get("run_id")) != run_id:
+            return False, None
+        if bool(normalized.get("is_synthetic", True)):
+            return False, None
+        if str(normalized.get("data_kind")) != "real":
             return False, None
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeError):
-            return False, None
-        if not isinstance(record, dict):
-            return False, None
-        if str(record.get("run_id")) != run_id:
-            return False, None
-        if bool(record.get("is_synthetic", True)):
-            return False, None
-        if str(record.get("data_kind")) != "real":
-            return False, None
-        try:
-            same_model = str(record.get("model_name")) == str(payload.get("model_name"))
-            same_size = image_sizes_match(record.get("image_size"), payload.get("image_size"))
+            same_model = str(normalized.get("model_name")) == str(payload.get("model_name"))
+            same_size = image_sizes_match(normalized.get("image_size"), payload.get("image_size"))
         except (TypeError, ValueError):
             return False, None
         if not same_model or not same_size:
             return False, None
-        return True, record
+        return True, normalized
+
+    @staticmethod
+    def _read_json(path: Path) -> dict | None:
+        if not path.is_file():
+            return None
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            return None
+        if not isinstance(record, dict):
+            return None
+        return record
+
+    @staticmethod
+    def _legacy_record(config: dict, run_id: str) -> dict | None:
+        paths = config.get("paths")
+        if not isinstance(paths, dict) or "run_records" not in paths:
+            return None
+        return RunRecord._read_json(Path(paths["run_records"]) / f"{run_id}.json")
+
+    @staticmethod
+    def _run_directory_record(config: dict, run_id: str) -> dict | None:
+        """``paths.runs/<run_id>/metrics.json`` from ``src.train.run_training``."""
+        paths = config.get("paths")
+        if not isinstance(paths, dict) or not paths.get("runs"):
+            return None
+        return RunRecord._read_json(Path(paths["runs"]) / run_id / "metrics.json")
+
+    @staticmethod
+    def _active_directory_record(config: dict, run_id: str) -> dict | None:
+        """A Hub snapshot of one run directory, set in memory by :class:`RunCheckpoint`."""
+        paths = config.get("paths")
+        if not isinstance(paths, dict) or not paths.get("active_run_dir"):
+            return None
+        return RunRecord._read_json(Path(paths["active_run_dir"]) / "metrics.json")
+
+    @staticmethod
+    def _normalize(record: dict, payload: dict) -> dict:
+        normalized = dict(record)
+        if not normalized.get("model_name") and normalized.get("model"):
+            normalized["model_name"] = normalized.get("model")
+        if "image_size" not in normalized:
+            normalized["image_size"] = payload.get("image_size")
+        if not normalized.get("data_kind"):
+            dataset = str(normalized.get("dataset", "")).strip().lower()
+            real_run = (
+                dataset in {"nasa", "tcir"}
+                and normalized.get("is_synthetic") is False
+                and normalized.get("result") is True
+            )
+            if real_run:
+                normalized["data_kind"] = "real"
+        return normalized
+
+    @staticmethod
+    def _with_active(config: dict, directory: Path) -> dict:
+        prepared = dict(config)
+        prepared["paths"] = dict(config.get("paths") or {})
+        prepared["paths"]["active_run_dir"] = str(directory)
+        return prepared
 
 
 class CoastalContext:
@@ -1038,3 +1116,201 @@ class IntensityEstimate:
     def _as_wind(output) -> float:
         wind = output[0] if isinstance(output, tuple) else output
         return float(wind.detach().cpu().reshape(-1)[0])
+
+
+class RunCheckpoint:
+    """Resolve a checkpoint from ``paths.runs/<run_id>/`` or a Hub mirror.
+
+    ``src.train.run_training`` writes that directory: the checkpoint file
+    named in ``paths.checkpoint_name``, plus ``metrics.json``. A model repo
+    with those same relative paths is the Hub mirror. ``CLOUDIE_RUN_ID``
+    overrides ``paths.run_id``. ``CLOUDIE_HF_MODEL_REPO`` overrides
+    ``paths.hf_model_repo``. ``CLOUDIE_CHECKPOINT`` is one local file for
+    the synthetic software check.
+
+    A real checkpoint produces a wind only when its run record passes
+    :meth:`ConfidenceScore._held_out_storm_check`. Until that record exists,
+    this returns no wind. A synthetic file is flagged by ``is_synthetic``.
+    """
+
+    ENV_REPO = "CLOUDIE_HF_MODEL_REPO"
+    ENV_RUN = "CLOUDIE_RUN_ID"
+    ENV_FILE = "CLOUDIE_CHECKPOINT"
+    MISSING = (
+        "No checkpoint was found. There is no model output. This is not a forecast."
+    )
+
+    @staticmethod
+    def _optional(config: dict, env_name: str, key: str) -> str | None:
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            value = (config.get("paths") or {}).get(key)
+            raw = "" if value in (None, "null") else str(value).strip()
+        if not raw or raw.lower() in {"none", "null"}:
+            return None
+        return raw
+
+    @staticmethod
+    def repo_id(config: dict) -> str | None:
+        raw = RunCheckpoint._optional(config, RunCheckpoint.ENV_REPO, "hf_model_repo")
+        if raw is None:
+            return None
+        namespace, separator, name = raw.partition("/")
+        allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+        if (
+            not separator
+            or "/" in name
+            or not namespace
+            or not name
+            or ".." in raw
+            or any(char not in allowed for char in namespace + name)
+        ):
+            raise ValueError("The Hugging Face model repo id must be namespace/name.")
+        return raw
+
+    @staticmethod
+    def run_id(config: dict) -> str | None:
+        raw = RunCheckpoint._optional(config, RunCheckpoint.ENV_RUN, "run_id")
+        if raw is None:
+            return None
+        if raw != Path(raw).name or ".." in raw:
+            raise ValueError("paths.run_id must be a single directory name.")
+        return raw
+
+    @staticmethod
+    def download(repo_id: str, filename: str) -> Path:
+        """Fetch one file from a model repo. Tests replace this method."""
+        if filename.startswith("/") or "\\" in filename or ".." in filename.split("/"):
+            raise ValueError("The Hub filename must stay inside the repo.")
+        message = (
+            "The Hugging Face checkpoint could not be loaded. "
+            "There is no model output. This is not a forecast."
+        )
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError as exc:
+            raise ValueError(message) from exc
+        try:
+            fetched = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model")
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            raise ValueError(message) from exc
+        return Path(fetched)
+
+    @staticmethod
+    def resolve(config: dict, root: Path | None = None) -> tuple[Path | None, dict]:
+        """Return the checkpoint and a config that can see its ``metrics.json``."""
+        override = os.environ.get(RunCheckpoint.ENV_FILE, "").strip()
+        if override:
+            path = Path(override)
+            prepared = RunRecord._with_active(config, path.parent) if path.is_file() else config
+            return (path if path.is_file() else None), prepared
+        base = root or Path()
+        selected = RunCheckpoint.run_id(config)
+        name = str(_section(config, "paths", "checkpoint_name"))
+        if name != Path(name).name:
+            raise ValueError("paths.checkpoint_name must be a file name, not a path.")
+        if selected:
+            directory = Path(_section(config, "paths", "runs")) / selected
+            if not directory.is_absolute():
+                directory = base / directory
+            local = directory / name
+            if local.is_file():
+                return local, RunRecord._with_active(config, local.parent)
+        repo = RunCheckpoint.repo_id(config)
+        if repo is None:
+            return None, config
+        prefix = f"{selected}/" if selected else ""
+        downloaded = RunCheckpoint.download(repo, f"{prefix}{name}")
+        try:
+            metrics = RunCheckpoint.download(repo, f"{prefix}metrics.json")
+        except ValueError:
+            metrics = None
+        if metrics is None:
+            return downloaded, config
+        return downloaded, RunRecord._with_active(config, metrics.parent)
+
+    @staticmethod
+    def held_out(config: dict, payload: dict) -> bool:
+        matched, record = RunRecord.load_match(config, payload)
+        if not matched or record is None:
+            return False
+        return bool(ConfidenceScore._held_out_storm_check(record))
+
+    @staticmethod
+    def estimate(
+        config: dict,
+        images: list[np.ndarray],
+        *,
+        hemisphere: str | None = None,
+        latitude=None,
+        longitude=None,
+        metadata=None,
+        root: Path | None = None,
+        path: Path | None = None,
+        resolve: bool = True,
+    ) -> Estimate:
+        """Gate the frame, then load a run checkpoint when one is allowed to answer.
+
+        ``path`` is an explicit file. ``resolve`` looks up ``paths.runs`` and
+        the Hub mirror when ``path`` is omitted.
+        """
+        try:
+            ctx = IntensityEstimate._context(config, latitude, longitude, metadata)
+        except ValueError:
+            ctx = IntensityEstimate._context(config, None, None, None)
+        settings = GateSettings.from_config(config)
+        frames = IntensityEstimate._unflipped(images, hemisphere)
+        reports = [CycloneImageGate.assess(frame, settings) for frame in frames]
+        refused = next((report for report in reports if not report.accepted), None)
+        if refused is not None:
+            return Estimate(
+                "not_cyclone",
+                IntensityEstimate._gate_banner(settings, refused.reason),
+                False,
+                gate_reason=refused.reason,
+                gate_score=refused.score,
+                **ctx,
+            )
+        try:
+            if path is not None:
+                chosen = Path(path)
+                if chosen.is_file():
+                    prepared = RunRecord._with_active(config, chosen.parent)
+                else:
+                    chosen = None
+                    prepared = config
+            elif resolve:
+                chosen, prepared = RunCheckpoint.resolve(config, root)
+            else:
+                chosen, prepared = None, config
+        except ValueError as exc:
+            return Estimate("no_run_record", str(exc), False, **ctx)
+        path = chosen
+        if path is None:
+            return Estimate("missing_checkpoint", RunCheckpoint.MISSING, False, **ctx)
+        try:
+            payload = CheckpointStore.load(path)
+        except (OSError, ValueError) as exc:
+            return Estimate("no_run_record", str(exc), False, **ctx)
+        synthetic = bool(payload.get("is_synthetic"))
+        if not synthetic and not RunCheckpoint.held_out(prepared, payload):
+            matched, _record = RunRecord.load_match(prepared, payload)
+            if matched:
+                message = str(_section(prepared, "predict", "held_out_refusal")).strip()
+            else:
+                message = str(_section(prepared, "predict", "no_run_record_refusal")).strip()
+            return Estimate("no_run_record", message, False, matched_run=matched, **ctx)
+        try:
+            return IntensityEstimate.predict(
+                prepared,
+                path,
+                images,
+                hemisphere=hemisphere,
+                latitude=latitude,
+                longitude=longitude,
+                metadata=metadata,
+            )
+        except (OSError, ValueError) as exc:
+            return Estimate("no_run_record", str(exc), synthetic, **ctx)

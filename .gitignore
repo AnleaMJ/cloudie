@@ -7,9 +7,11 @@ data/*
 !data/.gitkeep
 artifacts/*
 !artifacts/.gitkeep
+artifacts/runs/
 reports/*
 !reports/.gitkeep
 *.pt
 *.ckpt
 *.h5
 .streamlit/secrets.toml
+space/bundle/

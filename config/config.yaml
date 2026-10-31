@@ -12,7 +12,15 @@ paths:
   reports: reports
   checkpoint_name: checkpoint.pt
   run_records: artifacts/run_records
+  runs: artifacts/runs
+  nasa_root: data/nasa_tc
+  tcir_files: []
+  tcir_manifest_dir: data/tcir
+  # Empty until a real run is published. CLOUDIE_RUN_ID and CLOUDIE_HF_MODEL_REPO override these.
+  run_id: null
+  hf_model_repo: null
 data:
+  dataset: nasa
   # null or native keeps each chip's height and width. NASA TorchGeo chips
   # are 366x366 (Gurung et al. 2023). TCIR chips are 201x201. An integer
   # resizes the deep model to that square. Classical features stay native.
@@ -59,6 +67,8 @@ train:
   lr: 0.001
   weight_decay: 0.0001
   patience: 5
+  device: cpu
+  max_steps: null
   class_loss_weight: 0.1
   # Applied only when r34_nmi and rmw_nmi exist on the train split.
   size_loss_weight: 0.1
@@ -70,6 +80,9 @@ predict:
   no_run_record_refusal: >
     This checkpoint has no matching real-data run record.
     There is no model output. This is not a forecast.
+  held_out_refusal: >
+    This checkpoint's real-data run record has not passed the held-out
+    storm check. There is no model output. This is not a forecast.
   landfall_note: "not a landfall forecast"
   coast_reference_note: >
     Reference points are approximate coastal coordinates, not a shoreline

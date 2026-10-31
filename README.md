@@ -65,12 +65,18 @@ tolerance is labeled `uncalibrated`. Files under `reports/` are software
 checks. `quote_as_result` stays `no`. This is not a forecast or an
 operational-readiness claim.
 
-The deep path is `cloudie/`:
+`python -m src.train` is the training entrypoint. The CPU dry run and the
+GPU command are in `docs/TRAINING.md`. A GPU run needs approval, and there
+are no results to quote.
+
+The deep path is `cloudie/` for checkpoint scoring, prediction, and the page.
+Training itself is `src/train.py`, re-exported by `cloudie/train.py`:
 
 - Phase 3 trains with early stopping from `train.patience`, writes a
   checkpoint under `artifacts/`, and compares the held-out storms with the
   train-set mean. The wind loss is weighted Smooth L1. The class loss is
-  auxiliary.
+  auxiliary. `python -m src.train` writes the run record under
+  `artifacts/runs/` and stops on validation MAE. Smoke runs are not results.
 - Phase 4 is `cloudie/predict.py` and `streamlit run cloudie/app.py`.
   The page reports wind speed in knots, the intensity category of that
   wind, and a confidence score: the share of model samples in that
@@ -100,8 +106,8 @@ python -m src.baselines --config config/config_smoke.yaml
 Streamlit. The `test` job installs `requirements.txt` only and does not
 download imagery, so the training tests, the ConvLSTM tests, and the
 Streamlit page test skip there. The `torch` job installs CPU torch,
-torchvision, and Streamlit and runs those tests. Neither job downloads
-NASA, TCIR, or TorchGeo imagery.
+torchvision, Streamlit, and Gradio and runs those tests, including the
+Space page tests. Neither job downloads NASA, TCIR, or TorchGeo imagery.
 
 The baseline command writes `reports/smoke/baselines/`. That directory is
 gitignored. The CSV has `quote_as_result=no` on every row. Read
@@ -155,12 +161,28 @@ the Southern Hemisphere (do not silently flip), mixed 1-minute and 10-minute
 winds, and near-duplicate frames. The simplified DAV feature is not an
 operational DAV product.
 
+## Hugging Face Space
+
+`space/app.py` is a Gradio page for a free CPU Space. Vercel still loads
+the repository-root `app.py` and does not import torch. The Space imports
+only `src`, including the shared banner and `RunCheckpoint`. A later model
+is read from `artifacts/runs/<run_id>/` or a Hub repo that mirrors that
+directory. Build the Hub bundle with:
+
+```bash
+python space/sync_bundle.py --out /tmp/cloudie-space
+```
+
+`space/README.md` has the Space front matter and the upload steps. Hardware
+is `cpu-basic`. No trained weights are in the bundle.
+
 ## Layout
 
 ```
 src/                     canonical modules, features, baselines, held-out evaluation
 cloudie/                 re-exports, plus train, checkpoint evaluate, predict, sequences
 config/                  config.yaml and config_smoke.yaml
+space/                   Gradio Space, CPU torch requirements, bundle sync
 tests/                   pytest, using temporary smoke data
 docs/                    data sources, project notes, handoff
 ```

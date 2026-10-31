@@ -5,15 +5,28 @@ that table and do not restart the package under a new name.
 
 Shared modules are canonical in `src/`. `cloudie/` re-exports them so older
 imports keep working: `config`, `data_loader`, `preprocessing`, `schema`,
-`splits`, `metrics`, `model`, `make_smoke_data`, and `inference`. The
-network classes (SimpleCNN, ResNet-18, ConvLSTM, MC-dropout) live in
-`src/model.py`.
+`splits`, `metrics`, `model`, `make_smoke_data`, `inference`, `train`, and
+`sequences`. The network classes (SimpleCNN, ResNet-18, ConvLSTM, MC-dropout)
+live in `src/model.py`.
 
-Training, checkpoint scoring, prediction, and the ConvLSTM window helper
-stay in `cloudie/`: `train.py`, `evaluate.py`, `predict.py`, `app.py`,
-`web.py`, `sequences.py`, and `imd_satellite.py`. Do not fold checkpoint
-scoring into `src/evaluate.py`, and do not copy the held-out scorer into
-`cloudie/evaluate.py`.
+`src/train.py` is the training entrypoint (`python -m src.train`).
+`src/sequences.py` holds the ConvLSTM windows. `cloudie/train.py` and
+`cloudie/sequences.py` re-export them. Checkpoint scoring stays in
+`cloudie/evaluate.py`. Prediction and the page stay in `cloudie/predict.py`,
+`cloudie/app.py`, `cloudie/web.py`, and `cloudie/imd_satellite.py`.
+Do not fold checkpoint scoring into `src/evaluate.py`, and do not copy the
+held-out scorer into `cloudie/evaluate.py`. Commands are in
+`docs/TRAINING.md`. A GPU run needs misty wind's approval. No results exist
+yet.
+
+The Hugging Face Space is `space/`. It imports only from `src/`, including
+`NO_TRAINED_MODEL_BANNER` and `RunCheckpoint` in `src/inference.py`.
+`cloudie/app.py` re-exports that banner. Do not paste the banner sentence
+into `space/`, and do not copy the gate into `space/`. A later checkpoint
+is loaded from `artifacts/runs/<run_id>/` or from a Hub repo that mirrors
+that run directory. `python space/sync_bundle.py` copies `src/`, `config/`,
+and the bundled sample. Hardware is CPU basic. The Space is not a forecast.
+No weights are shipped.
 
 Phase 3 is `cloudie/train.py` and `cloudie/evaluate.py`. Early stopping reads
 `train.patience`. Checkpoints go under `paths.artifacts` and are gitignored.
@@ -84,8 +97,9 @@ when the train split has no size labels.
 - `src/evaluate.py` scores supplied predictions on the test storms from
   `storm_ids_by_split`. Mean and ridge reuse `src/baselines.py`. Persistence
   is the previous same-storm wind, not a feature. Normalization calls
-  `fit_split_normalization` in `cloudie/train.py`. That helper is not defined
-  on the splits module. `cloudie/splits.py` re-exports `src/splits.py`.
+  `fit_split_normalization` in `src/train.py` (`cloudie/train.py` re-exports
+  it). That helper is not defined on the splits module.
+  `cloudie/splits.py` re-exports `src/splits.py`.
   Do not copy this evaluator into `cloudie/evaluate.py`. Monte Carlo dropout
   coverage reads a sample array. This module does not import torch. A
   coverage gap larger than the tolerance is labeled `uncalibrated`.

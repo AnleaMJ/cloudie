@@ -15,25 +15,15 @@ import pandas as pd
 
 from cloudie.imd_satellite import IMD_BUTTON, describe_frame, fetch_current_infrared
 from cloudie.predict import Prediction, category_span
+from src.inference import (
+    CONFIDENCE_NOTE,
+    GROUPING_LABEL,
+    NO_TRAINED_MODEL_BANNER,
+    PAGE_LEAD,
+    SCALE_NOTE,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
-PAGE_LEAD = "Predict cyclone wind speed and intensity category from an infrared image."
-NO_TRAINED_MODEL_BANNER = (
-    "No trained model yet. This page cannot produce estimates. "
-    "Not a forecast or warning system. "
-    "Best-track labels are noisy, and no survey or smoke number is a result of this project."
-)
-CONFIDENCE_NOTE = (
-    "Confidence mixes the image gate, dropout spread, and a residual-quantile "
-    "width when one exists. It is uncalibrated until a held-out storm check exists. "
-    "It is not a forecast interval."
-)
-SCALE_NOTE = (
-    "Reported winds stay between 0 and 200 kt: below depression, depression, "
-    "cyclonic storm, severe, very severe, and extremely severe or super cyclonic storm. "
-    "Those names are this project's grouping, not an official IMD class."
-)
-GROUPING_LABEL = "Project grouping"
 
 
 def public_banner(text: str) -> str:
