@@ -19,7 +19,7 @@ fullWidth: false
 Academic demo that reads one infrared frame and, when a checkpoint is allowed
 to answer, reports a wind speed in knots and this project's own intensity
 grouping. The page shows the same permanent banner as the web demo
-(`NO_TRAINED_MODEL_BANNER` in `cloudie/app.py`). It is not a forecast or a
+(`NO_TRAINED_MODEL_BANNER` in `src/inference.py`). It is not a forecast or a
 warning system. No trained weights are in this bundle.
 
 The greyscale cyclone-IR gate and `RunCheckpoint` live in `src/inference.py`.
