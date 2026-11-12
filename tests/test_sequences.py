@@ -112,6 +112,67 @@ def test_windows_do_not_cross_a_split() -> None:
     ]
 
 
+def test_shuffled_frame_table_is_causal(tmp_path: Path) -> None:
+    """Past frames only. The target is the latest frame in the window.
+
+    One synthetic storm, six timestamps, rows shuffled. A centred window
+    would feed a frame from after the label time.
+    """
+    from src.sequences import frame_windows as windows_for
+    from src.sequences import stack_windows as stack_for
+
+    rows = []
+    root = tmp_path / "causal"
+    image_dir = root / "images"
+    image_dir.mkdir(parents=True)
+    for hour in range(6):
+        sample_id = f"syn_{hour}"
+        relative = Path("images") / f"{sample_id}.npy"
+        # The pixel value is the hour index, not a brightness temperature.
+        np.save(root / relative, np.full((4, 4), float(hour), dtype=np.float32))
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "storm_id": "SYN",
+                "split": "train",
+                "timestamp": f"2019-08-01T{hour:02d}:00:00Z",
+                "image_path": relative.as_posix(),
+                "wind_speed_kt": 20.0 + hour * 5.0,
+                "_class": f"mark-{hour}",
+            }
+        )
+    frame = pd.DataFrame(rows).iloc[[4, 1, 5, 0, 3, 2]].reset_index(drop=True)
+    stamps = pd.to_datetime(frame["timestamp"], utc=True)
+    assert not bool(stamps.is_monotonic_increasing)
+
+    windows = windows_for(frame, "train")
+    assert len(windows) == 3
+    lookup = frame.set_index(frame["sample_id"].astype(str), drop=False)
+    for window in windows:
+        times = [pd.Timestamp(lookup.loc[sample_id, "timestamp"]) for sample_id in window]
+        assert times == sorted(times)
+        assert len(set(times)) == len(times)
+        latest = max(times)
+        assert pd.Timestamp(lookup.loc[window[-1], "timestamp"]) == latest
+        assert all(stamp <= latest for stamp in times)
+
+    manifest = root / "manifest.csv"
+    frame.to_csv(manifest, index=False)
+    images, winds, labels, size = stack_for(frame, manifest, "train", None, None, 0.30)
+    assert size is None
+    assert images.shape[0] == len(windows)
+    for index, window in enumerate(windows):
+        last = lookup.loc[window[-1]]
+        assert float(winds[index]) == pytest.approx(float(last["wind_speed_kt"]))
+        assert labels[index] == str(last["_class"])
+        last_time = pd.Timestamp(last["timestamp"])
+        for step, sample_id in enumerate(window):
+            row = lookup.loc[sample_id]
+            assert pd.Timestamp(row["timestamp"]) <= last_time
+            hour = float(str(sample_id).rsplit("_", 1)[-1])
+            assert np.allclose(images[index, step], hour)
+
+
 def test_short_storm_has_no_window_and_length_is_four() -> None:
     frame = pd.DataFrame(
         {
