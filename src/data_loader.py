@@ -38,6 +38,43 @@ def load_image(path: str | Path) -> np.ndarray:
     return np.asarray(Image.open(file_path), dtype=np.float32)
 
 
+def apply_frame_cache(
+    frame: pd.DataFrame, dataset: str, cache_root: str | Path | None
+) -> pd.DataFrame:
+    """Point rows at cached fp16 ``.npy`` files when that dataset's index exists.
+
+    A missing cache leaves ``image_path`` unchanged. A sample that is not
+    in the index, or whose file is gone, keeps its source path.
+    """
+    if cache_root in (None, "", "null"):
+        return frame
+    index = Path(cache_root) / str(dataset).strip().lower() / "index.csv"
+    if not index.is_file():
+        return frame
+    cached = pd.read_csv(index)
+    if "sample_id" not in cached.columns or "cache_path" not in cached.columns:
+        raise ValueError(f"frame cache index {index} needs sample_id and cache_path")
+    mapping = {
+        str(sample): str(path)
+        for sample, path in zip(cached["sample_id"], cached["cache_path"], strict=False)
+    }
+    out = frame.copy()
+    paths: list[str] = []
+    replaced = 0
+    for sample_id, image_path in zip(out["sample_id"].astype(str), out["image_path"].astype(str)):
+        candidate = mapping.get(sample_id)
+        if candidate and Path(candidate).is_file():
+            paths.append(str(Path(candidate).resolve()))
+            if paths[-1] != str(Path(image_path).resolve()):
+                replaced += 1
+        else:
+            paths.append(image_path)
+    out["image_path"] = paths
+    if replaced:
+        print(f"{dataset} frame cache supplied {replaced} fp16 frames from {index}")
+    return out
+
+
 def prepare_split(
     frame: pd.DataFrame,
     manifest_path: str | Path,

@@ -25,6 +25,78 @@ class NormStats:
     source_split: str
 
 
+# Pixel units stay on the dataset that produced them. NASA chips are 8-bit
+# counts. TCIR IR1 is brightness temperature in kelvin. They are never
+# pooled into one mean and std. A later dataset gets its own entry.
+PIXEL_KIND = {
+    "nasa": "uint8",
+    "tcir": "brightness_temperature_k",
+    "smoke": "synthetic",
+}
+
+
+def pixel_kind(dataset: str) -> str:
+    """Unit label for one dataset. Unknown datasets stay unspecified."""
+    return PIXEL_KIND.get(str(dataset).strip().lower(), "unspecified")
+
+
+def norm_by_dataset(dataset: str, stats: NormStats) -> dict:
+    """One dataset's train-split stats. The map has that key only."""
+    if stats.source_split != "train":
+        raise LeakageError("normalization stats may be fit on the train split only")
+    name = str(dataset).strip().lower()
+    if not name:
+        raise ValueError("dataset name is required for normalization stats")
+    return {
+        name: {
+            "mean": float(stats.mean),
+            "std": float(stats.std),
+            "source_split": "train",
+            "pixel_kind": pixel_kind(name),
+        }
+    }
+
+
+def norm_stats_from_checkpoint(payload: dict) -> NormStats:
+    """Stats for the checkpoint's own dataset. Mixed maps are refused.
+
+    A checkpoint written before per-dataset stats still uses ``norm_mean``
+    and ``norm_std``. A map with two datasets, or a key that is not the
+    checkpoint dataset, is not applied.
+    """
+    grouped = payload.get("norm_by_dataset")
+    dataset = payload.get("dataset")
+    if isinstance(grouped, dict) and grouped:
+        if len(grouped) != 1:
+            raise ValueError(
+                "checkpoint mixes normalization stats across datasets; refusing to apply them"
+            )
+        name = None if dataset is None else str(dataset)
+        if name not in grouped:
+            raise ValueError(
+                "checkpoint norm_by_dataset does not match the checkpoint dataset; "
+                "refusing to mix normalization stats"
+            )
+        entry = grouped[name]
+        if str(entry.get("source_split")) != "train":
+            raise ValueError("checkpoint normalization was not fit on train")
+        return NormStats(
+            mean=float(entry["mean"]),
+            std=float(entry["std"]),
+            source_split="train",
+        )
+    if "norm_mean" not in payload or "norm_std" not in payload:
+        raise ValueError("checkpoint is missing normalization stats")
+    source = payload.get("norm_source_split")
+    if source is not None and str(source) != "train":
+        raise ValueError("checkpoint normalization was not fit on train")
+    return NormStats(
+        mean=float(payload["norm_mean"]),
+        std=float(payload["norm_std"]),
+        source_split="train",
+    )
+
+
 def as_channel_first(image: np.ndarray) -> np.ndarray:
     array = np.asarray(image, dtype=np.float32)
     if array.ndim == 2:

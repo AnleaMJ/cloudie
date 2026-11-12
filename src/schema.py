@@ -216,6 +216,58 @@ def recorded_wind_averaging(frame: pd.DataFrame) -> str:
     return unique[0]
 
 
+# The label's duration in seconds. This is not a wind conversion factor.
+_AVERAGING_SECONDS = {
+    "1min": 60,
+    "1-min": 60,
+    "1minute": 60,
+    "1-minute": 60,
+    "3min": 180,
+    "3-min": 180,
+    "3minute": 180,
+    "3-minute": 180,
+    "10min": 600,
+    "10-min": 600,
+    "10minute": 600,
+    "10-minute": 600,
+}
+
+
+def wind_averaging_seconds(period: object) -> int | None:
+    """Seconds for a 1, 3, or 10 minute label. Other labels have no duration.
+
+    ``1min`` is 60, ``3-min`` is 180, and ``10min`` is 600. Synthetic and
+    unknown text stay null. This does not rescale a wind speed.
+    """
+    if period is None:
+        return None
+    text = str(period).strip().lower().replace(" ", "").replace("_", "-")
+    if not text:
+        return None
+    return _AVERAGING_SECONDS.get(text)
+
+
+def split_wind_averaging(frame: pd.DataFrame) -> dict[str, dict[str, list]]:
+    """``wind_averaging`` and ``wind_averaging_s`` for train, val, and test.
+
+    Each split lists the set of labels on its rows. Seconds follow the
+    label. A label with no known duration stores null and is not converted.
+    """
+    if "split" not in frame.columns:
+        raise SchemaError("split is required to record wind_averaging by split")
+    if "wind_averaging" not in frame.columns:
+        raise SchemaError("wind_averaging is required")
+    report: dict[str, dict[str, list]] = {}
+    for name in ("train", "val", "test"):
+        rows = frame.loc[frame["split"].astype(str) == name, "wind_averaging"]
+        labels = sorted({str(value).strip() for value in rows.tolist() if str(value).strip()})
+        report[name] = {
+            "wind_averaging": labels,
+            "wind_averaging_s": [wind_averaging_seconds(label) for label in labels],
+        }
+    return report
+
+
 def _synthetic_flags(frame: pd.DataFrame) -> list[bool]:
     if "is_synthetic" not in frame.columns:
         raise SchemaError(
