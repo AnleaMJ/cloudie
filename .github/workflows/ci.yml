@@ -30,7 +30,7 @@ jobs:
       - name: Run model, sequence, training, Streamlit, and Space tests
         run: |
           set -o pipefail
-          pytest tests/test_model.py tests/test_convlstm_smoke.py tests/test_sequences.py tests/test_train.py tests/test_predict.py tests/test_space_app.py -o addopts= -ra --tb=short --junitxml=pytest-torch.xml | tee pytest-torch.txt
+          pytest tests/test_model.py tests/test_convlstm_smoke.py tests/test_sequences.py tests/test_train.py tests/test_predict.py tests/test_space_app.py tests/test_runtime.py -o addopts= -ra --tb=short --junitxml=pytest-torch.xml | tee pytest-torch.txt
       - name: Fail if any of these tests skipped
         run: |
           python - <<'PY'
@@ -63,6 +63,7 @@ jobs:
               "tests/test_train.py",
               "tests/test_predict.py",
               "tests/test_space_app.py",
+              "tests/test_runtime.py",
           ]
           print(f"CI torch job: {passed} passed, {skipped} skipped, {failed} failed")
           problems = []

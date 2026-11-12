@@ -75,8 +75,8 @@ checks. `quote_as_result` stays `no`. This is not a forecast or an
 operational-readiness claim.
 
 `python -m src.train` is the training entrypoint. The CPU dry run and the
-GPU command are in `docs/TRAINING.md`. A GPU run needs approval, and there
-are no results to quote.
+XPU or CUDA command are in `docs/TRAINING.md`. An accelerator run needs
+approval, and there are no results to quote.
 
 The deep path is `cloudie/` for checkpoint scoring, prediction, and the page.
 Training itself is `src/train.py`, re-exported by `cloudie/train.py`:

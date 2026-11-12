@@ -42,6 +42,9 @@ REQUIRED = {
         "patience",
         "class_loss_weight",
         "size_loss_weight",
+        "grad_accum_steps",
+        "num_workers",
+        "device_parity_tol",
     ],
     "predict": ["advisory_jump_kt"],
     "features": [

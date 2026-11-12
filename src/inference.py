@@ -1034,15 +1034,11 @@ class IntensityEstimate:
 
     @staticmethod
     def _prepare(config: dict, payload: dict, reports: list[GateReport]) -> list[np.ndarray]:
-        from src.preprocessing import NormStats, prepare_image
+        from src.preprocessing import norm_stats_from_checkpoint, prepare_image
 
         mode = FrameGeometry.mode(config)
         pad = str(_section(config, "data", "pad")).strip()
-        stats = NormStats(
-            mean=float(payload["norm_mean"]),
-            std=float(payload["norm_std"]),
-            source_split="train",
-        )
+        stats = norm_stats_from_checkpoint(payload)
         image_size = parse_image_size(payload["image_size"])
         limit = float(payload["max_missing_fraction"])
         prepared = []
