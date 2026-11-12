@@ -94,6 +94,17 @@ when the train split has no size labels.
   classes. `imd5_class` stores that group. `src/evaluate.py` calls this
   grouping "our own grouping, IMD-style names" and always reports VSCS and
   ESCS/SuCS. It records `wind_averaging` and does not convert periods.
+- `src.evaluate.intensity_class_evaluation` scores regression predictions
+  on the validation split only and refuses test rows. `src.baselines` writes
+  that table to `per_class_metrics.csv`. Intervals are 95% storm-id bootstrap
+  percentile intervals (`baselines.bootstrap_resamples`, seed `baselines.seed`).
+  A `wind_averaging` column is optional on the scored frame: when present it
+  is copied through and metrics are grouped by it, without converting periods.
+  An `on_fix` column is optional: when present, the table also includes rows
+  whose label sits on a best-track fix. Classes with fewer than 3 storms are
+  marked `indicative (n_storms<3)`. `per_storm_breakdown` lists those storms.
+  Do not score the test split in that table, and do not commit metric numbers
+  that were not produced by a real run.
 - `src/evaluate.py` scores supplied predictions on the test storms from
   `storm_ids_by_split`. Mean, ridge, and persistence reuse `src/baselines.py`.
   Persistence is a reference baseline: the previous frame's best-track label,

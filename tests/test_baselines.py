@@ -49,6 +49,8 @@ def _params(**overrides):
             "xgb_max_depth": 2,
             "xgb_learning_rate": 0.1,
             "max_iter": 300,
+            "bootstrap_resamples": 32,
+            "per_storm_breakdown": True,
             "regression_models": ["mean", "ridge"],
             "classification_models": ["most_frequent", "logreg"],
         },
@@ -286,6 +288,24 @@ def test_smoke_images_run_the_configured_baselines(tmp_path: Path) -> None:
     assert (tmp_path / "out" / "baseline_comparison.md").stat().st_size > 0
     assert (tmp_path / "out" / "confusion_persistence.png").stat().st_size > 0
     assert (tmp_path / "out" / "scatter_persistence.png").stat().st_size > 0
+    per_class = pd.read_csv(tmp_path / "out" / "per_class_metrics.csv")
+    assert set(per_class["split"]) == {"val"}
+    assert set(per_class["subset"]) == {"all"}
+    assert set(per_class["resample"]) == {"storm_id"}
+    assert set(per_class["quote_as_result"]) == {"no"}
+    assert set(per_class["wind_averaging"]) == {"synthetic"}
+    assert set(per_class["n_resamples"]) == {1000}
+    assert "test" not in set(per_class["split"].astype(str))
+    small = per_class[
+        (per_class["row_kind"] == "class")
+        & (per_class["n_storms"] > 0)
+        & (per_class["n_storms"] < 3)
+    ]
+    if len(small):
+        assert small["status"].eq("indicative (n_storms<3)").all()
+    text = (tmp_path / "out" / "per_class_metrics.md").read_text(encoding="utf-8")
+    assert "validation" in text.lower()
+    assert "storm" in text.lower()
 
 
 def test_persistence_follows_relative_time_and_stays_inside_the_storm() -> None:
@@ -378,3 +398,122 @@ def test_official_side_is_not_the_modeling_split() -> None:
     refused["split"]["strategy"] = "chronological"
     with pytest.raises(BaselineDataError, match="storm-wise"):
         frame_for_storm_split(frame, refused)
+
+
+def test_per_class_table_scores_validation_rows_only(tmp_path: Path, monkeypatch) -> None:
+    seen: list[set[str]] = []
+    from src.evaluate import intensity_class_evaluation as real
+
+    def spy(*args, **kwargs):
+        splits = kwargs.get("splits", args[4])
+        seen.append(set(np.asarray(splits).astype(str)))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("src.evaluate.intensity_class_evaluation", spy)
+    frame = _protocol_frame()
+    run_baselines(frame, ["f1", "f2"], _params(), tmp_path)
+    assert seen
+    assert all(item == {"val"} for item in seen)
+    table = pd.read_csv(tmp_path / "per_class_metrics.csv")
+    assert set(table["split"]) == {"val"}
+    assert set(table["subset"]) == {"all"}
+    assert set(table["resample"]) == {"storm_id"}
+    assert set(table["n_resamples"]) == {32}
+    assert set(table["seed"]) == {0}
+    assert table["ci_level"].to_numpy() == pytest.approx(0.95)
+    assert (table["quote_as_result"] == "no").all()
+    assert table["wind_averaging"].isna().all()
+    train = frame[frame["split"] == "train"]
+    val = frame[frame["split"] == "val"]
+    expected = regression_metrics(
+        val["wind_speed_kt"], np.full(len(val), train["wind_speed_kt"].mean())
+    )
+    overall = table[
+        (table["model"] == "mean")
+        & (table["row_kind"] == "overall")
+        & (table["intensity_class"] == "overall")
+    ].iloc[0]
+    assert overall["n_rows"] == len(val)
+    assert overall["n_storms"] == val["storm_id"].nunique()
+    assert overall["mae_kt"] == pytest.approx(expected["mae_kt"])
+    assert overall["rmse_kt"] == pytest.approx(expected["rmse_kt"])
+    assert overall["bias_kt"] == pytest.approx(expected["bias_kt"])
+    assert overall["status"] == "indicative (n_storms<3)"
+    dd = table[
+        (table["model"] == "mean")
+        & (table["row_kind"] == "class")
+        & (table["intensity_class"] == "D_DD")
+    ].iloc[0]
+    assert dd["n_rows"] == 4
+    assert dd["n_storms"] == 1
+    assert dd["status"] == "indicative (n_storms<3)"
+    storms = table[
+        (table["model"] == "mean")
+        & (table["row_kind"] == "storm")
+        & (table["intensity_class"] == "D_DD")
+    ]
+    assert list(storms["storm_id"]) == ["v1"]
+    empty = table[
+        (table["model"] == "mean")
+        & (table["row_kind"] == "class")
+        & (table["intensity_class"] == "SCS")
+    ].iloc[0]
+    assert empty["n_rows"] == 0
+    assert empty["n_storms"] == 0
+    assert pd.isna(empty["rmse_kt"])
+    assert pd.isna(empty["status"])
+    note = (tmp_path / "per_class_metrics.md").read_text(encoding="utf-8")
+    assert "indicative (n_storms<3)" in note
+    assert "validation split only" in note.lower()
+    comparison = (tmp_path / "baseline_comparison.md").read_text(encoding="utf-8")
+    assert "per_class_metrics.csv" in comparison
+
+
+def test_per_class_groups_wind_averaging_and_on_fix(tmp_path: Path) -> None:
+    frame = _protocol_frame()
+    frame["wind_averaging"] = "1min"
+    frame.loc[frame["storm_id"] == "v2", "wind_averaging"] = "3-min"
+    frame["on_fix"] = False
+    frame.loc[frame["sample_id"].isin(["v1_0", "v1_1"]), "on_fix"] = True
+    config = _params(
+        regression_models=["mean"],
+        classification_models=["most_frequent"],
+        bootstrap_resamples=8,
+    )
+    run_baselines(frame, ["f1", "f2"], config, tmp_path)
+    table = pd.read_csv(tmp_path / "per_class_metrics.csv")
+    mean = table[table["model"] == "mean"]
+    assert set(mean["wind_averaging"]) == {"1min", "3-min"}
+    assert set(mean["subset"]) == {"all", "on_fix"}
+
+    def _count(subset: str, period: str, kind: str, name: str) -> int:
+        match = mean[
+            (mean["subset"] == subset)
+            & (mean["wind_averaging"] == period)
+            & (mean["row_kind"] == kind)
+            & (mean["intensity_class"] == name)
+        ]
+        assert len(match) == 1
+        return int(match.iloc[0]["n_rows"])
+
+    assert _count("all", "1min", "overall", "overall") == 4
+    assert _count("all", "1min", "class", "D_DD") == 4
+    assert _count("on_fix", "1min", "class", "D_DD") == 2
+    assert _count("on_fix", "1min", "overall", "overall") == 2
+    assert _count("all", "3-min", "class", "CS") == 4
+    assert _count("on_fix", "3-min", "class", "CS") == 0
+    assert _count("all", "3-min", "overall", "overall") == 4
+
+
+def test_per_storm_breakdown_can_be_turned_off(tmp_path: Path) -> None:
+    config = _params(
+        regression_models=["mean"],
+        classification_models=["most_frequent"],
+        bootstrap_resamples=8,
+        per_storm_breakdown=False,
+    )
+    run_baselines(_protocol_frame(), ["f1", "f2"], config, tmp_path)
+    table = pd.read_csv(tmp_path / "per_class_metrics.csv")
+    assert "storm" not in set(table["row_kind"])
+    marked = table[(table["model"] == "mean") & (table["intensity_class"] == "D_DD")]
+    assert marked["status"].eq("indicative (n_storms<3)").all()

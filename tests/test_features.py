@@ -573,3 +573,27 @@ def test_feature_table_keeps_source_split_and_timestamp_order(tmp_path: Path) ->
                 np.isnan(single.set_index("sample_id").loc[sample_id, name])
                 and np.isnan(paired.loc[sample_id, name])
             )
+    assert "wind_averaging" not in single.columns
+    assert "on_fix" not in single.columns
+
+
+def test_feature_table_passes_through_wind_averaging_and_on_fix(tmp_path: Path) -> None:
+    image = np.full((16, 16), 40.0, dtype=np.float32)
+    np.save(tmp_path / "a.npy", image)
+    frame = pd.DataFrame(
+        [
+            {
+                "sample_id": "a",
+                "image_path": "a.npy",
+                "storm_id": "s",
+                "split": "train",
+                "wind_speed_kt": 40.0,
+                "wind_averaging": "1min",
+                "on_fix": True,
+            }
+        ]
+    )
+    table, dropped = extract_feature_table(frame, tmp_path / "manifest.csv", _spec())
+    assert dropped == 0
+    assert table.loc[0, "wind_averaging"] == "1min"
+    assert bool(table.loc[0, "on_fix"]) is True
