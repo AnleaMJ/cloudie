@@ -48,7 +48,7 @@ The IMD best-track workbook used for the label audit is
 | File | What it is |
 | --- | --- |
 | `storm_split.csv` | One row per INCYDE `Sequence` (91 storms). Columns: `Sequence`, `storm_id` (`INCYDE-Sxx_IMD-yyyy-nnn`), `name`, `basin`, `peak_imd_class`, `proposed_split` (`train`/`val`/`test`), `cooccurrence_group`. |
-| `exclusions.csv` | `filename`, `qc_flag` for every flagged frame (163 originals and their 770 augmented copies). Flags: `wrong_date_imd_daymonth_swap` (73 Sequence-42 originals whose dates are a day/month swap, plus 365 augs), `label_ne_imd_interp` (67 originals), `outside_imd_track_span` (23 originals). |
+| `exclusions.csv` | `filename`, `qc_flag`, `default_exclude` for every flagged frame (163 originals and their 770 augmented copies). Only `wrong_date_imd_daymonth_swap` (73 Sequence-42 originals plus 365 augs) has `default_exclude=true`. `label_ne_imd_interp` (67 originals) and `outside_imd_track_span` (23 originals) are flag-only (`default_exclude=false`), so the loader keeps them unless asked to drop them. The 789 co-scene frames of INCYDE's default split are not listed here; the storm split handles them. |
 | `proposed_split_groups.csv` | Co-occurrence groups and the peak-class assignment used to draw the split (seed `20261112`). |
 | `build_manifest.py` | Rebuilds `manifest.csv` plus the three CSVs above. |
 | `match.py` | `SEQUENCE_TO_IMD` mapping, including Sequence 46 → `2017-010`. |
