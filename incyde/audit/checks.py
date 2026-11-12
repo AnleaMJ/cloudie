@@ -26,7 +26,7 @@ def main() -> None:
         .label_kt.max()
         .reset_index()
         .groupby("proposed_split")
-        .apply(lambda g: ", ".join(f"{s[7:9]}:{v}" for s, v in zip(g.storm_id, g.label_kt)))
+        .apply(lambda g: ", ".join(f"{s[7:10]}:{v}" for s, v in zip(g.storm_id, g.label_kt)))
         .to_string()
     )
     print("storms in >1 proposed split:", (m.groupby("storm_id").proposed_split.nunique() > 1).sum())
