@@ -18,7 +18,7 @@ from cloudie.config import checkpoint_path as configured_checkpoint
 from cloudie.config import image_sizes_match, load_config, parse_image_size
 from cloudie.data_loader import load_manifest
 from cloudie.metrics import mean_baseline, metrics_by_class, regression_metrics
-from cloudie.preprocessing import NormStats
+from cloudie.preprocessing import norm_stats_from_checkpoint
 from cloudie.sequences import stack_windows
 from cloudie.train import (
     NOT_A_FORECAST,
@@ -113,13 +113,7 @@ def evaluate(config: dict, checkpoint_path: str | Path | None = None) -> Evaluat
     frame = load_manifest(manifest)
     assigned = split_frame(frame, config)
     assigned["_class"] = project_labels(assigned, config)
-    stats = NormStats(
-        mean=float(payload["norm_mean"]),
-        std=float(payload["norm_std"]),
-        source_split=str(payload["norm_source_split"]),
-    )
-    if stats.source_split != "train":
-        raise ValueError("checkpoint normalization was not fit on train")
+    stats = norm_stats_from_checkpoint(payload)
     image_size = parse_image_size(payload["image_size"])
     max_missing = float(payload["max_missing_fraction"])
     if uses_sequences(config):

@@ -8,6 +8,7 @@ data/*
 artifacts/*
 !artifacts/.gitkeep
 artifacts/runs/
+artifacts/bench/
 reports/*
 !reports/.gitkeep
 *.pt

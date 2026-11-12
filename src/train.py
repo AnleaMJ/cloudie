@@ -6,6 +6,11 @@ The wind loss is weighted Smooth L1. The class loss is auxiliary. A size
 term is added only when ``r34_nmi`` and ``rmw_nmi`` exist as labels, and
 those columns are targets, not inputs. ``model.name: convlstm`` uses four
 frames from the same storm and the same split.
+
+``python -m src.train`` picks xpu, then cuda, then cpu. XPU and CUDA both
+need ``CLOUDIE_ALLOW_GPU=1``. Normalization is fit per dataset on train
+storms only. ``--init-from`` loads weights for a later dataset and refits
+those stats. ``--resume`` continues the last finished epoch.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import json
 import logging
 import os
 import random
+import subprocess
 import time
 from pathlib import Path
 
@@ -24,12 +30,25 @@ import numpy as np
 import pandas as pd
 
 from src.config import checkpoint_path, load_config, parse_image_size
-from src.data_loader import load_image, load_manifest, resolve_image
-from src.preprocessing import NormStats, fit_norm_stats, prepare_image, stack_prepared
+from src.data_loader import apply_frame_cache, load_image, load_manifest, resolve_image
+from src.device import (
+    amp_policy_for,
+    autocast_context,
+    compare_model_parity,
+    make_grad_scaler,
+    peak_memory_bytes,
+    reset_peak_memory,
+    resolve_device,
+    seeded_parity_batch,
+    xpu_device_properties,
+)
+from src.preprocessing import NormStats, fit_norm_stats, norm_by_dataset, prepare_image, stack_prepared
 from src.schema import (
     SchemaError,
     parse_is_synthetic,
     recorded_wind_averaging,
+    split_wind_averaging,
+    wind_averaging_seconds,
     wind_to_imd5,
 )
 from src.sequences import N_FRAMES, size_targets_present, stack_windows
@@ -136,7 +155,12 @@ _TRAIN_KEYS = (
     "patience",
     "class_loss_weight",
     "size_loss_weight",
+    "grad_accum_steps",
+    "num_workers",
+    "device_parity_tol",
 )
+
+LAST_CHECKPOINT = "last.pt"
 
 
 def _require_train_block(config: dict) -> dict:
@@ -238,6 +262,102 @@ def _torch():
     import torch
 
     return torch
+
+
+def build_loader(dataset, *, batch_size: int, shuffle: bool, num_workers: int, generator=None):
+    """DataLoader with ``persistent_workers`` whenever workers are used.
+
+    ``num_workers`` comes from ``train.num_workers``. Zero workers load in
+    the parent process and do not set ``persistent_workers``.
+    """
+    from torch.utils.data import DataLoader
+
+    workers = int(num_workers)
+    if workers < 0:
+        raise ValueError("train.num_workers must be >= 0")
+    kwargs = {
+        "batch_size": int(batch_size),
+        "shuffle": bool(shuffle),
+        "num_workers": workers,
+    }
+    if generator is not None:
+        kwargs["generator"] = generator
+    if workers > 0:
+        kwargs["persistent_workers"] = True
+    return DataLoader(dataset, **kwargs)
+
+
+class ArrayFrames:
+    """In-memory frames. Module-level so Windows workers can unpickle it."""
+
+    def __init__(self, images, winds, labels, known: list[str], sample_weight, size=None) -> None:
+        torch = _torch()
+        index = {name: position for position, name in enumerate(known)}
+        class_index = [index.get(label, -1) if label is not None else -1 for label in labels]
+        self.images = torch.from_numpy(np.ascontiguousarray(images))
+        self.winds = torch.from_numpy(np.asarray(winds, dtype=np.float32)).view(-1, 1)
+        self.class_index = torch.tensor(class_index, dtype=torch.long)
+        self.sample_weight = torch.tensor(np.asarray(sample_weight), dtype=torch.float32)
+        self.size = None if size is None else torch.tensor(np.asarray(size), dtype=torch.float32)
+
+    def __len__(self) -> int:
+        return int(self.images.shape[0])
+
+    def __getitem__(self, item: int):
+        row = (
+            self.images[item],
+            self.winds[item],
+            self.class_index[item],
+            self.sample_weight[item],
+        )
+        if self.size is None:
+            return row
+        return row + (self.size[item],)
+
+
+class PathFrames:
+    """Load one frame per item so DataLoader workers stay on small files.
+
+    A cache path is an fp16 ``.npy``. A source path is whatever the
+    manifest already pointed at. Normalization uses the train-split stats
+    for this dataset only.
+    """
+
+    def __init__(
+        self,
+        records: list[dict],
+        image_size: int | None,
+        mean: float | None,
+        std: float | None,
+        max_missing: float,
+        known: list[str],
+    ) -> None:
+        self.records = list(records)
+        self.image_size = image_size
+        self.mean = None if mean is None else float(mean)
+        self.std = None if std is None else float(std)
+        self.max_missing = float(max_missing)
+        self.known = list(known)
+        self._index = {name: position for position, name in enumerate(known)}
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, item: int):
+        torch = _torch()
+        row = self.records[item]
+        stats = None
+        if self.mean is not None and self.std is not None:
+            stats = NormStats(mean=self.mean, std=self.std, source_split="train")
+        image = prepare_image(load_image(row["path"]), self.image_size, stats, self.max_missing)
+        label = row["label"]
+        class_index = self._index.get(label, -1) if label is not None else -1
+        return (
+            torch.from_numpy(np.ascontiguousarray(image)),
+            torch.tensor([float(row["wind"])], dtype=torch.float32),
+            torch.tensor(class_index, dtype=torch.long),
+            torch.tensor(float(row["weight"]), dtype=torch.float32),
+        )
 
 
 def uses_sequences(config: dict) -> bool:
@@ -363,16 +483,21 @@ def _run_epoch(
     class_loss_weight: float,
     train: bool,
     size_loss_weight: float = 0.0,
+    grad_accum_steps: int = 1,
 ):
     torch = _torch()
+    accum = int(grad_accum_steps)
+    if accum < 1:
+        raise ValueError("train.grad_accum_steps must be at least 1")
     model.train(train)
     total = 0.0
     count = 0
+    pending = 0
+    if train:
+        optimizer.zero_grad(set_to_none=True)
     for batch in loader:
         images, winds, class_index, sample_weight = batch[0], batch[1], batch[2], batch[3]
         size_target = batch[4] if len(batch) > 4 else None
-        if train:
-            optimizer.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(train):
             wind_hat, logits, size_hat = _split_output(model(images))
             monitor = _wind_loss(wind_hat, winds, None)
@@ -387,11 +512,18 @@ def _run_epoch(
             ):
                 loss = loss + size_loss_weight * _size_loss(size_hat, size_target)
             if train:
-                loss.backward()
-                optimizer.step()
+                (loss / accum).backward()
+                pending += 1
+                if pending == accum:
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    pending = 0
         batch_rows = int(images.shape[0])
         total += float(monitor.detach()) * batch_rows
         count += batch_rows
+    if train and pending:
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
     if count == 0:
         raise ValueError("loader produced no rows")
     return total / count
@@ -405,35 +537,7 @@ def _dataset(
     sample_weight: np.ndarray,
     size: np.ndarray | None = None,
 ):
-    torch = _torch()
-    from torch.utils.data import Dataset
-
-    index = {name: position for position, name in enumerate(known)}
-    class_index = [index.get(label, -1) if label is not None else -1 for label in labels]
-
-    class _Frames(Dataset):
-        def __init__(self) -> None:
-            self.images = torch.from_numpy(np.ascontiguousarray(images))
-            self.winds = torch.from_numpy(np.asarray(winds, dtype=np.float32)).view(-1, 1)
-            self.class_index = torch.tensor(class_index, dtype=torch.long)
-            self.sample_weight = torch.tensor(sample_weight, dtype=torch.float32)
-            self.size = None if size is None else torch.tensor(np.asarray(size), dtype=torch.float32)
-
-        def __len__(self) -> int:
-            return int(self.images.shape[0])
-
-        def __getitem__(self, item: int):
-            row = (
-                self.images[item],
-                self.winds[item],
-                self.class_index[item],
-                self.sample_weight[item],
-            )
-            if self.size is None:
-                return row
-            return row + (self.size[item],)
-
-    return _Frames()
+    return ArrayFrames(images, winds, labels, known, sample_weight, size)
 
 
 def _aligned_size(frame: pd.DataFrame, split_name: str) -> np.ndarray:
@@ -506,7 +610,6 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
     frame = load_manifest(manifest)
     wind_period = assert_wind_averaging(config, frame)
     torch = _torch()
-    from torch.utils.data import DataLoader
 
     seed = int(config["project"]["seed"])
     _set_seed(seed)
@@ -530,18 +633,22 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
     # Validation uses weight 1. The class weights stay the train fold's.
     val_weight = np.ones(len(val_labels), dtype=np.float64)
     batch_size = int(train_cfg["batch_size"])
+    workers = int(train_cfg["num_workers"])
+    grad_accum_steps = int(train_cfg["grad_accum_steps"])
     generator = torch.Generator()
     generator.manual_seed(seed)
-    train_loader = DataLoader(
+    train_loader = build_loader(
         _dataset(train_images, train_winds, train_labels, known, sample_weight, train_size),
         batch_size=batch_size,
         shuffle=True,
+        num_workers=workers,
         generator=generator,
     )
-    val_loader = DataLoader(
+    val_loader = build_loader(
         _dataset(val_images, val_winds, val_labels, known, val_weight, val_size),
         batch_size=batch_size,
         shuffle=False,
+        num_workers=workers,
     )
     model = build_net(config, size_head=size_head)
     optimizer = torch.optim.AdamW(
@@ -565,6 +672,7 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
             class_loss_weight,
             True,
             size_loss_weight,
+            grad_accum_steps,
         )
         val_loss = _run_epoch(
             model,
@@ -584,6 +692,7 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
     model.load_state_dict(stopper.best_state)
     checkpoint = checkpoint_path(config)
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    dataset_name = str(config["data"]["dataset"])
     payload = {
         "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
         "model_name": str(config["model"]["name"]),
@@ -596,6 +705,8 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
         "norm_mean": stats.mean,
         "norm_std": stats.std,
         "norm_source_split": stats.source_split,
+        "norm_by_dataset": norm_by_dataset(dataset_name, stats),
+        "dataset": dataset_name,
         "image_size": image_size,
         "max_missing_fraction": max_missing,
         "mean_baseline_kt": float(
@@ -607,6 +718,8 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
         ),
         "is_synthetic": synthetic,
         "wind_averaging": wind_period,
+        "wind_averaging_s": wind_averaging_seconds(wind_period),
+        "wind_averaging_by_split": split_wind_averaging(assigned),
         "split": {
             "strategy": str(config["split"]["strategy"]),
             "seed": int(config["split"]["seed"]),
@@ -651,28 +764,6 @@ def canonical_model_name(name: str) -> str:
     if key not in _CLI_MODELS:
         raise ValueError("model must be simplecnn or resnet18")
     return _CLI_MODELS[key]
-
-
-def resolve_device(name: str):
-    """CPU, or CUDA only when ``CLOUDIE_ALLOW_GPU=1``.
-
-    A GPU run needs misty wind's approval. The env var is that approval
-    on the machine that will run it. This function does not acquire a GPU.
-    """
-    choice = str(name).strip().lower()
-    if choice not in {"cpu", "cuda"}:
-        raise ValueError("device must be cpu or cuda")
-    if choice == "cuda" and os.environ.get("CLOUDIE_ALLOW_GPU") != "1":
-        raise RuntimeError(
-            "Refusing device cuda. A GPU run needs misty wind's approval. "
-            "Set CLOUDIE_ALLOW_GPU=1 only after that approval."
-        )
-    torch = _torch()
-    if choice == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError("device cuda was approved but CUDA is not available")
-        return torch.device("cuda")
-    return torch.device("cpu")
 
 
 def refuse_mixed_resolution(frame: pd.DataFrame, dataset: str) -> None:
@@ -856,7 +947,7 @@ def _move_batch(batch, device):
     return images, winds, class_index, sample_weight, size_target
 
 
-def _split_mae(model, loader, device) -> float:
+def _split_mae(model, loader, device, policy) -> float:
     """Validation MAE in knots. Dropout is off. This is the early-stopping score."""
     torch = _torch()
     was_training = model.training
@@ -866,8 +957,10 @@ def _split_mae(model, loader, device) -> float:
     with torch.no_grad():
         for batch in loader:
             images, winds, _class_index, _sample_weight, _size = _move_batch(batch, device)
-            wind_hat, _logits, _size_hat = _split_output(model(images))
-            total += float(torch.abs(wind_hat.view(-1) - winds.view(-1)).sum())
+            with autocast_context(policy):
+                wind_hat, _logits, _size_hat = _split_output(model(images))
+                error = torch.abs(wind_hat.float().view(-1) - winds.float().view(-1))
+            total += float(error.sum())
             count += int(images.shape[0])
     if was_training:
         model.train()
@@ -876,7 +969,7 @@ def _split_mae(model, loader, device) -> float:
     return total / count
 
 
-def _collect_predictions(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
+def _collect_predictions(model, loader, device, policy) -> tuple[np.ndarray, np.ndarray]:
     """Point predictions with dropout off, aligned with the loader order."""
     torch = _torch()
     was_training = model.training
@@ -886,9 +979,10 @@ def _collect_predictions(model, loader, device) -> tuple[np.ndarray, np.ndarray]
     with torch.no_grad():
         for batch in loader:
             images, winds, _class_index, _sample_weight, _size = _move_batch(batch, device)
-            wind_hat, _logits, _size_hat = _split_output(model(images))
-            truths.append(winds.detach().cpu().numpy().reshape(-1))
-            preds.append(wind_hat.detach().cpu().numpy().reshape(-1))
+            with autocast_context(policy):
+                wind_hat, _logits, _size_hat = _split_output(model(images))
+            truths.append(winds.detach().float().cpu().numpy().reshape(-1))
+            preds.append(wind_hat.detach().float().cpu().numpy().reshape(-1))
     if was_training:
         model.train()
     if not truths:
@@ -896,44 +990,112 @@ def _collect_predictions(model, loader, device) -> tuple[np.ndarray, np.ndarray]
     return np.concatenate(truths), np.concatenate(preds)
 
 
-def _fit_run(model, train_loader, val_loader, train_cfg: dict, device, max_steps: int | None):
-    """Smooth L1 on wind, AdamW, early stopping on validation MAE."""
+def _apply_step(optimizer, scaler) -> None:
+    if scaler is None:
+        optimizer.step()
+    else:
+        scaler.step(optimizer)
+        scaler.update()
+    optimizer.zero_grad(set_to_none=True)
+
+
+def _optimizer_cpu_state(optimizer) -> dict:
+    torch = _torch()
+    blob = optimizer.state_dict()
+    for state in blob["state"].values():
+        for key, value in list(state.items()):
+            if torch.is_tensor(value):
+                state[key] = value.detach().cpu()
+    return blob
+
+
+def _move_optimizer_to(optimizer, device) -> None:
+    torch = _torch()
+    for state in optimizer.state.values():
+        for key, value in list(state.items()):
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
+
+
+def _fit_run(
+    model,
+    train_loader,
+    val_loader,
+    train_cfg: dict,
+    device,
+    max_steps: int | None,
+    *,
+    start_epoch: int = 0,
+    history: list | None = None,
+    stopper: EarlyStopping | None = None,
+    steps_done: int = 0,
+    optimizer_state: dict | None = None,
+    on_epoch_end=None,
+    already_stopped: bool = False,
+):
+    """Smooth L1 on wind, AdamW, early stopping on validation MAE.
+
+    Gradient accumulation steps come from ``train.grad_accum_steps``.
+    CUDA fp16 uses GradScaler. XPU bf16 and CPU fp32 do not. A checkpoint
+    callback runs after every finished epoch so a sleep can resume there.
+    """
     torch = _torch()
     import torch.nn.functional as F
 
+    policy = amp_policy_for(device)
+    accum = int(train_cfg["grad_accum_steps"])
+    if accum < 1:
+        raise ValueError("train.grad_accum_steps must be at least 1")
+    if max_steps is not None and int(max_steps) < 1:
+        raise ValueError("max_steps must be at least 1")
     model.to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(train_cfg["lr"]),
         weight_decay=float(train_cfg["weight_decay"]),
     )
+    if optimizer_state is not None:
+        optimizer.load_state_dict(optimizer_state)
+        _move_optimizer_to(optimizer, device)
+    scaler = make_grad_scaler(policy)
     epochs = int(train_cfg["epochs"])
-    stopper = EarlyStopping(int(train_cfg["patience"]))
-    if max_steps is not None and int(max_steps) < 1:
-        raise ValueError("max_steps must be at least 1")
-    history: list[dict[str, float | int]] = []
-    steps = 0
-    stopped_early = False
-    for epoch in range(epochs):
+    if stopper is None:
+        stopper = EarlyStopping(int(train_cfg["patience"]))
+    history = list(history or [])
+    steps = int(steps_done)
+    stopped_early = bool(already_stopped)
+    reset_peak_memory(device)
+    end_epoch = start_epoch if already_stopped else epochs
+    for epoch in range(int(start_epoch), int(end_epoch)):
         model.train()
+        optimizer.zero_grad(set_to_none=True)
         total = 0.0
         count = 0
+        pending = 0
         for batch in train_loader:
             if max_steps is not None and steps >= int(max_steps):
                 break
             images, winds, _class_index, _sample_weight, _size = _move_batch(batch, device)
-            optimizer.zero_grad(set_to_none=True)
-            wind_hat, _logits, _size_hat = _split_output(model(images))
-            loss = F.smooth_l1_loss(wind_hat.view(-1), winds.view(-1))
-            loss.backward()
-            optimizer.step()
+            with autocast_context(policy):
+                wind_hat, _logits, _size_hat = _split_output(model(images))
+                loss = F.smooth_l1_loss(wind_hat.float().view(-1), winds.float().view(-1))
+            if scaler is None:
+                (loss / accum).backward()
+            else:
+                scaler.scale(loss / accum).backward()
+            pending += 1
             rows = int(images.shape[0])
             total += float(loss.detach()) * rows
             count += rows
             steps += 1
+            if pending == accum:
+                _apply_step(optimizer, scaler)
+                pending = 0
+        if pending:
+            _apply_step(optimizer, scaler)
         if count == 0:
             break
-        val_mae = _split_mae(model, val_loader, device)
+        val_mae = _split_mae(model, val_loader, device, policy)
         if not np.isfinite(val_mae):
             raise RuntimeError("validation MAE is not finite")
         history.append(
@@ -947,13 +1109,24 @@ def _fit_run(model, train_loader, val_loader, train_cfg: dict, device, max_steps
         state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
         if stopper.update(float(val_mae), state):
             stopped_early = True
+        if on_epoch_end is not None:
+            on_epoch_end(
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                history=history,
+                stopper=stopper,
+                steps=steps,
+                stopped_early=stopped_early,
+            )
+        if stopped_early:
             break
         if max_steps is not None and steps >= int(max_steps):
             break
     if stopper.best_state is None:
         raise RuntimeError("training produced no validation score")
     model.load_state_dict(stopper.best_state)
-    return model, history, stopped_early, float(stopper.best)
+    return model, history, stopped_early, float(stopper.best), peak_memory_bytes(device)
 
 
 def _config_hash(config: dict) -> str:
@@ -1002,6 +1175,137 @@ def _run_id(dataset: str, model_name: str, config_digest: str) -> str:
     return f"{dataset}-{model_name}-{stamp}-{time.time_ns()}-{config_digest[:8]}"
 
 
+def git_commit() -> str | None:
+    """HEAD of this checkout, or null when git is not available."""
+    try:
+        text = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return text or None
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_torch_payload(path: Path) -> dict:
+    torch = _torch()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{path} is not a checkpoint dict")
+    return payload
+
+
+def _parent_periods(payload: dict) -> set[str]:
+    periods: set[str] = set()
+    grouped = payload.get("wind_averaging_by_split")
+    if isinstance(grouped, dict):
+        for entry in grouped.values():
+            if isinstance(entry, dict):
+                periods.update(str(value) for value in entry.get("wind_averaging", []))
+    single = payload.get("wind_averaging")
+    if single not in (None, ""):
+        periods.add(str(single))
+    return {value for value in periods if value and value.lower() != "none"}
+
+
+def load_init_weights(model, path: str | Path, config: dict) -> tuple[object, str, set[str]]:
+    """Load weights only. Optimizer state is left untouched.
+
+    A different ``model_name`` or a state dict whose keys or shapes differ
+    is refused. The returned hash is the file bytes, and the period set is
+    whatever the parent run recorded.
+    """
+    checkpoint = Path(path)
+    payload = _load_torch_payload(checkpoint)
+    if "state_dict" not in payload:
+        raise RuntimeError(f"Refusing init-from: {checkpoint} has no state_dict")
+    expected = str(config["model"]["name"])
+    loaded_name = payload.get("model_name")
+    if loaded_name is not None and str(loaded_name) != expected:
+        raise RuntimeError(
+            "Refusing init-from: architecture does not match "
+            f"(checkpoint model {loaded_name}, training model {expected})"
+        )
+    incoming = payload["state_dict"]
+    current = model.state_dict()
+    if set(incoming) != set(current):
+        missing = sorted(set(current) - set(incoming))[:8]
+        extra = sorted(set(incoming) - set(current))[:8]
+        raise RuntimeError(
+            "Refusing init-from: architecture does not match "
+            f"(missing {missing}, extra {extra})"
+        )
+    for key, tensor in current.items():
+        if tuple(tensor.shape) != tuple(incoming[key].shape):
+            raise RuntimeError(
+                "Refusing init-from: architecture does not match at "
+                f"{key}: {tuple(tensor.shape)} vs {tuple(incoming[key].shape)}"
+            )
+    model.load_state_dict({key: value.detach().cpu() for key, value in incoming.items()})
+    run_id = payload.get("run_id")
+    return run_id, _file_sha256(checkpoint), _parent_periods(payload)
+
+
+def _warn_wind_mismatch(parent: set[str], current: set[str]) -> bool:
+    """Loud warning when a fine-tune crosses averaging periods. No conversion."""
+    if not parent or not current or parent == current:
+        return False
+    message = (
+        "WARNING: wind_averaging mismatch. "
+        f"Parent checkpoint records {sorted(parent)} and this dataset records {sorted(current)}. "
+        "No conversion factor is applied. A sourced factor will be added later."
+    )
+    LOGGER.warning(message)
+    print(message)
+    return True
+
+
+def _path_records(frame: pd.DataFrame, manifest: Path, split_name: str) -> list[dict]:
+    rows = frame[frame["split"] == split_name].reset_index(drop=True)
+    if rows.empty:
+        raise ValueError(f"split {split_name} has no rows")
+    labels = [None if pd.isna(value) else str(value) for value in rows["_class"]]
+    paths = [str(resolve_image(manifest, path)) for path in rows["image_path"].tolist()]
+    winds = rows["wind_speed_kt"].to_numpy(dtype=np.float64)
+    return [
+        {"path": paths[index], "wind": float(winds[index]), "label": labels[index], "weight": 1.0}
+        for index in range(len(rows))
+    ]
+
+
+def _parity_side(config: dict, frame: pd.DataFrame) -> int:
+    side = parse_image_size(config["data"]["image_size"])
+    if side is not None:
+        return int(side)
+    if "orig_size" in frame.columns and len(frame):
+        return int(frame["orig_size"].iloc[0])
+    if "native_height" in frame.columns and len(frame):
+        return int(frame["native_height"].iloc[0])
+    raise ValueError("cannot infer the frame size for the device parity check")
+
+
+def _current_periods(report: dict) -> set[str]:
+    periods: set[str] = set()
+    for entry in report.values():
+        periods.update(str(value) for value in entry["wind_averaging"])
+    return periods
+
+
 def run_training(
     config: dict,
     *,
@@ -1009,111 +1313,250 @@ def run_training(
     model: str | None = None,
     max_steps: int | None = None,
     device: str | None = None,
+    resume: str | Path | None = None,
+    init_from: str | Path | None = None,
 ) -> Path:
-    """Fit one dataset and write the run record under ``paths.runs``."""
+    """Fit one dataset and write the run record under ``paths.runs``.
+
+    ``resume`` continues the last finished epoch in that run directory.
+    ``init_from`` copies weights from another run, refits normalization on
+    this dataset's train storms, and does not load the optimizer.
+    """
     import yaml
 
+    if resume is not None and init_from is not None:
+        raise ValueError("pass either --resume or --init-from, not both")
     assert_model_inputs(("image",))
     train_cfg = _require_train_block(config)
     assert_normalize(config)
     resolved = copy.deepcopy(config)
-    dataset_name = str(dataset if dataset is not None else resolved["data"]["dataset"]).strip().lower()
+    saved = None
+    if resume is not None:
+        run_dir = Path(resume)
+        saved = _load_torch_payload(run_dir / LAST_CHECKPOINT)
+        if "state_dict" not in saved or "epoch" not in saved:
+            raise RuntimeError(f"{run_dir / LAST_CHECKPOINT} is not a resume checkpoint")
+    if dataset is not None:
+        dataset_name = str(dataset).strip().lower()
+    elif saved is not None:
+        dataset_name = str(saved["dataset"]).strip().lower()
+    else:
+        dataset_name = str(resolved["data"]["dataset"]).strip().lower()
     if dataset_name not in _DATASETS:
         raise ValueError(f"dataset must be one of {', '.join(_DATASETS)}")
+    if saved is not None and str(saved["dataset"]) != dataset_name:
+        raise RuntimeError(
+            f"resume dataset is {saved['dataset']} but this command asked for {dataset_name}"
+        )
     if model is not None:
         resolved["model"]["name"] = canonical_model_name(model)
+    elif saved is not None:
+        resolved["model"]["name"] = str(saved["model_name"])
     else:
         resolved["model"]["name"] = canonical_model_name(str(resolved["model"]["name"]))
     if resolved["model"]["name"] not in {"simple_cnn", "resnet18"}:
         raise ValueError("this entrypoint trains simplecnn or resnet18")
+    if saved is not None and str(saved["model_name"]) != str(resolved["model"]["name"]):
+        raise RuntimeError(
+            "Refusing resume: architecture does not match "
+            f"(checkpoint model {saved['model_name']}, training model {resolved['model']['name']})"
+        )
     device_name = str(device if device is not None else resolved["train"]["device"])
     torch_device = resolve_device(device_name)
+    policy = amp_policy_for(torch_device)
     if max_steps is None:
         max_steps = resolved["train"]["max_steps"]
     if max_steps is not None:
         max_steps = int(max_steps)
     resolved["data"]["dataset"] = dataset_name
-    resolved["train"]["device"] = "cuda" if torch_device.type == "cuda" else "cpu"
+    resolved["train"]["device"] = torch_device.type
+    resolved["train"]["device_requested"] = device_name
+    resolved["train"]["precision"] = policy.precision
     resolved["train"]["max_steps"] = max_steps
     digest = _config_hash(resolved)
     resolved["config_hash"] = digest
+    print(f"device={torch_device.type} precision={policy.precision}")
+    LOGGER.info("device=%s precision=%s", torch_device.type, policy.precision)
 
-    frame, n_excluded = load_training_frame(dataset_name, resolved)
-    refuse_mixed_resolution(frame, dataset_name)
-    wind_period = assert_wind_averaging(resolved, frame)
-    synthetic = dataset_name == "smoke" or manifest_is_synthetic(frame)
-    seed = int(resolved["project"]["seed"])
-    _set_seed(seed)
-    assigned = assign_project_split(frame, resolved)
-    assigned["_class"] = project_labels(assigned, resolved)
-    groups = storm_ids_by_split(assigned)
-    if not groups["train"] or not groups["val"] or not groups["test"]:
-        raise LeakageError("train, val, and test storms are all required")
-
-    run_id = _run_id(dataset_name, str(resolved["model"]["name"]), digest)
-    run_dir = Path(resolved["paths"]["runs"]) / run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
-    manifest_path = run_dir / "split_manifest.csv"
-    assigned.drop(columns=["_class"], errors="ignore").to_csv(manifest_path, index=False)
-    labeled = assigned.copy()
+    if saved is None:
+        frame, n_excluded = load_training_frame(dataset_name, resolved)
+        frame = apply_frame_cache(frame, dataset_name, resolved["paths"].get("frame_cache"))
+        refuse_mixed_resolution(frame, dataset_name)
+        wind_period = assert_wind_averaging(resolved, frame)
+        synthetic = dataset_name == "smoke" or manifest_is_synthetic(frame)
+        seed = int(resolved["project"]["seed"])
+        _set_seed(seed)
+        assigned = assign_project_split(frame, resolved)
+        assigned["_class"] = project_labels(assigned, resolved)
+        groups = storm_ids_by_split(assigned)
+        if not groups["train"] or not groups["val"] or not groups["test"]:
+            raise LeakageError("train, val, and test storms are all required")
+        run_id = _run_id(dataset_name, str(resolved["model"]["name"]), digest)
+        run_dir = Path(resolved["paths"]["runs"]) / run_id
+        run_dir.mkdir(parents=True, exist_ok=False)
+        manifest_path = run_dir / "split_manifest.csv"
+        assigned.drop(columns=["_class"], errors="ignore").to_csv(manifest_path, index=False)
+        labeled = assigned.copy()
+        labeled["_class"] = project_labels(labeled, resolved)
+        start_epoch = 0
+        prior_history: list = []
+        restored_stopper = None
+        steps_done = 0
+        optimizer_state = None
+        already_stopped = False
+    else:
+        if not run_dir.is_dir():
+            raise FileNotFoundError(run_dir)
+        manifest_path = run_dir / "split_manifest.csv"
+        labeled = load_manifest(manifest_path)
+        wind_period = assert_wind_averaging(resolved, labeled)
+        synthetic = dataset_name == "smoke" or manifest_is_synthetic(labeled)
+        seed = int(saved.get("seed", resolved["project"]["seed"]))
+        _set_seed(seed)
+        labeled["_class"] = project_labels(labeled, resolved)
+        groups = storm_ids_by_split(labeled)
+        if not groups["train"] or not groups["val"] or not groups["test"]:
+            raise LeakageError("train, val, and test storms are all required")
+        run_id = str(saved["run_id"])
+        n_excluded = int(saved.get("n_excluded", 0))
+        start_epoch = int(saved["epoch"]) + 1
+        prior_history = list(saved.get("history") or [])
+        restored_stopper = EarlyStopping(int(train_cfg["patience"]))
+        restored_stopper.best = float(saved["best_metric"])
+        restored_stopper.waits = int(saved["waits"])
+        restored_stopper.best_state = saved["best_state"]
+        steps_done = int(saved.get("steps", 0))
+        optimizer_state = saved.get("optimizer_state_dict")
+        already_stopped = bool(saved.get("stopped_early"))
 
     size_head = False
     stats = fit_split_normalization(labeled, manifest_path, resolved)
     if stats.source_split != "train":
         raise LeakageError("normalization stats may be fit on the train split only")
-    train_images, train_winds, train_labels, _train_size = _load_examples(
-        resolved, labeled, manifest_path, "train", stats, size_head
-    )
-    val_images, val_winds, val_labels, _val_size = _load_examples(
-        resolved, labeled, manifest_path, "val", stats, size_head
-    )
-    test_images, test_winds, test_labels, _test_size = _load_examples(
-        resolved, labeled, manifest_path, "test", stats, size_head
-    )
-    del test_labels
+    dataset_stats = norm_by_dataset(dataset_name, stats)
+    averaging = split_wind_averaging(labeled)
     known = [str(name) for name in resolved["data"]["imd5_names"]]
-    # The wind loss is unweighted Smooth L1. Class weights stay on train().
-    train_weight = np.ones(len(train_labels), dtype=np.float64)
-    val_weight = np.ones(len(val_labels), dtype=np.float64)
-    test_weight = np.ones(len(test_winds), dtype=np.float64)
+    image_size = parse_image_size(resolved["data"]["image_size"])
+    max_missing = float(resolved["data"]["max_missing_fraction"])
     batch_size = int(train_cfg["batch_size"])
+    workers = int(train_cfg["num_workers"])
     torch = _torch()
-    from torch.utils.data import DataLoader
-
     generator = torch.Generator()
     generator.manual_seed(seed)
-    train_loader = DataLoader(
-        _dataset(train_images, train_winds, train_labels, known, train_weight, None),
+    train_loader = build_loader(
+        PathFrames(
+            _path_records(labeled, manifest_path, "train"),
+            image_size,
+            stats.mean,
+            stats.std,
+            max_missing,
+            known,
+        ),
         batch_size=batch_size,
         shuffle=True,
+        num_workers=workers,
         generator=generator,
     )
-    val_loader = DataLoader(
-        _dataset(val_images, val_winds, val_labels, known, val_weight, None),
+    val_loader = build_loader(
+        PathFrames(
+            _path_records(labeled, manifest_path, "val"),
+            image_size,
+            stats.mean,
+            stats.std,
+            max_missing,
+            known,
+        ),
         batch_size=batch_size,
         shuffle=False,
+        num_workers=workers,
     )
-    test_loader = DataLoader(
-        _dataset(test_images, test_winds, [None] * len(test_winds), known, test_weight, None),
+    test_loader = build_loader(
+        PathFrames(
+            _path_records(labeled, manifest_path, "test"),
+            image_size,
+            stats.mean,
+            stats.std,
+            max_missing,
+            known,
+        ),
         batch_size=batch_size,
         shuffle=False,
+        num_workers=workers,
     )
     model = build_net(resolved, size_head=size_head)
     if not any(layer.__class__.__name__ == "Dropout" for layer in model.modules()):
         raise RuntimeError("MC-dropout needs a Dropout layer left in the network")
-    model, history, stopped_early, best_val_mae = _fit_run(
-        model, train_loader, val_loader, train_cfg, torch_device, max_steps
+    parent_run_id = None
+    parent_sha = None
+    parent_periods: set[str] = set()
+    if init_from is not None:
+        parent_run_id, parent_sha, parent_periods = load_init_weights(model, init_from, resolved)
+    if saved is not None:
+        model.load_state_dict(saved["state_dict"])
+    mismatch = _warn_wind_mismatch(parent_periods, _current_periods(averaging))
+    parity = None
+    if torch_device.type != "cpu":
+        images, winds = seeded_parity_batch(
+            min(2, batch_size),
+            int(resolved["data"]["channels"]),
+            _parity_side(resolved, labeled),
+            seed=0,
+        )
+        parity = compare_model_parity(
+            model,
+            images,
+            winds,
+            torch_device,
+            float(train_cfg["device_parity_tol"]),
+            policy=policy,
+        )
+
+    def _on_epoch_end(*, epoch, model, optimizer, history, stopper, steps, stopped_early) -> None:
+        blob = {
+            "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+            "optimizer_state_dict": _optimizer_cpu_state(optimizer),
+            "epoch": int(epoch),
+            "history": list(history),
+            "best_state": stopper.best_state,
+            "best_metric": float(stopper.best),
+            "waits": int(stopper.waits),
+            "steps": int(steps),
+            "stopped_early": bool(stopped_early),
+            "run_id": run_id,
+            "dataset": dataset_name,
+            "model_name": str(resolved["model"]["name"]),
+            "seed": seed,
+            "n_excluded": int(n_excluded),
+        }
+        torch.save(blob, run_dir / LAST_CHECKPOINT)
+
+    model, history, stopped_early, best_val_mae, peak_bytes = _fit_run(
+        model,
+        train_loader,
+        val_loader,
+        train_cfg,
+        torch_device,
+        max_steps,
+        start_epoch=start_epoch,
+        history=prior_history,
+        stopper=restored_stopper,
+        steps_done=steps_done,
+        optimizer_state=optimizer_state,
+        on_epoch_end=_on_epoch_end,
+        already_stopped=already_stopped,
     )
     if not history:
         raise RuntimeError("training produced no loss curve")
-    val_truth, val_pred = _collect_predictions(model, val_loader, torch_device)
-    test_truth, test_pred = _collect_predictions(model, test_loader, torch_device)
-    image_size = parse_image_size(resolved["data"]["image_size"])
+    val_truth, val_pred = _collect_predictions(model, val_loader, torch_device, policy)
+    test_truth, test_pred = _collect_predictions(model, test_loader, torch_device, policy)
     checkpoint_name = str(resolved["paths"]["checkpoint_name"])
     if not checkpoint_name or checkpoint_name != Path(checkpoint_name).name:
         raise ValueError("paths.checkpoint_name must be a file name, not a path")
     checkpoint = run_dir / checkpoint_name
     split_ids = {name: sorted(groups[name]) for name in ("train", "val", "test")}
+    train_winds = labeled.loc[labeled["split"] == "train", "wind_speed_kt"].to_numpy(dtype=np.float64)
+    properties = xpu_device_properties(torch_device)
+    commit = git_commit()
     payload = {
         "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
         "model_name": str(resolved["model"]["name"]),
@@ -1126,11 +1569,15 @@ def run_training(
         "norm_mean": stats.mean,
         "norm_std": stats.std,
         "norm_source_split": stats.source_split,
+        "norm_by_dataset": dataset_stats,
         "image_size": image_size,
-        "max_missing_fraction": float(resolved["data"]["max_missing_fraction"]),
-        "mean_baseline_kt": float(np.mean(np.asarray(train_winds, dtype=np.float64))),
+        "max_missing_fraction": max_missing,
+        "mean_baseline_kt": float(np.mean(train_winds)),
         "is_synthetic": bool(synthetic),
         "wind_averaging": wind_period,
+        "wind_averaging_s": wind_averaging_seconds(wind_period),
+        "wind_averaging_by_split": averaging,
+        "wind_averaging_mismatch": bool(mismatch),
         "split": {
             "strategy": str(resolved["split"]["strategy"]),
             "seed": int(resolved["split"]["seed"]),
@@ -1151,7 +1598,21 @@ def run_training(
         "dataset": dataset_name,
         "run_id": run_id,
         "result": False if synthetic else True,
-        "device": resolved["train"]["device"],
+        "device": torch_device.type,
+        "device_requested": device_name,
+        "precision": policy.precision,
+        "use_grad_scaler": bool(policy.use_grad_scaler),
+        "grad_accum_steps": int(train_cfg["grad_accum_steps"]),
+        "peak_memory_bytes": peak_bytes,
+        "git_commit": commit,
+        "parent_run_id": None if parent_run_id is None else str(parent_run_id),
+        "parent_checkpoint_sha256": parent_sha,
+        "xpu_device_properties": properties,
+        "device_parity_ok": None if parity is None else bool(parity["ok"]),
+        "device_parity_max_abs_diff": None if parity is None else parity["max_abs_diff"],
+        "device_parity_output_max_abs": None if parity is None else parity["output_max_abs"],
+        "device_parity_loss_max_abs": None if parity is None else parity["loss_max_abs"],
+        "device_parity_tol": float(train_cfg["device_parity_tol"]),
     }
     torch.save(payload, checkpoint)
     (run_dir / "resolved_config.yaml").write_text(
@@ -1167,8 +1628,15 @@ def run_training(
         "model": str(resolved["model"]["name"]),
         "seed": seed,
         "config_hash": digest,
+        "git_commit": commit,
+        "resolved_config": "resolved_config.yaml",
         "run_id": run_id,
         "wind_averaging": wind_period,
+        "wind_averaging_s": wind_averaging_seconds(wind_period),
+        "wind_averaging_by_split": averaging,
+        "wind_averaging_mismatch": bool(mismatch),
+        "parent_run_id": None if parent_run_id is None else str(parent_run_id),
+        "parent_checkpoint_sha256": parent_sha,
         "n_excluded": int(n_excluded),
         "stopped_early": bool(stopped_early),
         "best_val_mae": best_val_mae,
@@ -1177,6 +1645,19 @@ def run_training(
         "scored_by": "src.evaluate.score_winds",
         "val": _score_split(val_truth, val_pred, resolved),
         "test": _score_split(test_truth, test_pred, resolved),
+        "device": torch_device.type,
+        "device_requested": device_name,
+        "precision": policy.precision,
+        "use_grad_scaler": bool(policy.use_grad_scaler),
+        "grad_accum_steps": int(train_cfg["grad_accum_steps"]),
+        "peak_memory_bytes": peak_bytes,
+        "xpu_device_properties": properties,
+        "device_parity_ok": None if parity is None else bool(parity["ok"]),
+        "device_parity_max_abs_diff": None if parity is None else parity["max_abs_diff"],
+        "device_parity_output_max_abs": None if parity is None else parity["output_max_abs"],
+        "device_parity_loss_max_abs": None if parity is None else parity["loss_max_abs"],
+        "device_parity_tol": float(train_cfg["device_parity_tol"]),
+        "norm_by_dataset": dataset_stats,
         "note": SMOKE_BANNER if synthetic else NOT_A_FORECAST,
     }
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
@@ -1197,7 +1678,9 @@ def main(argv: list[str] | None = None) -> Path:
     parser.add_argument("--dataset", choices=_DATASETS, default=None)
     parser.add_argument("--model", choices=("simplecnn", "resnet18"), default=None)
     parser.add_argument("--max-steps", type=int, default=None)
-    parser.add_argument("--device", choices=("cpu", "cuda"), default=None)
+    parser.add_argument("--device", choices=("auto", "xpu", "cuda", "cpu"), default=None)
+    parser.add_argument("--resume", type=Path, default=None)
+    parser.add_argument("--init-from", type=Path, default=None)
     args = parser.parse_args(argv)
     config = load_config(args.config)
     return run_training(
@@ -1206,6 +1689,8 @@ def main(argv: list[str] | None = None) -> Path:
         model=args.model,
         max_steps=args.max_steps,
         device=args.device,
+        resume=args.resume,
+        init_from=args.init_from,
     )
 
 

@@ -1,0 +1,8 @@
+# Optional Intel Arc / XPU install. GitHub Actions does not use this file.
+# Windows-native, from the official PyTorch XPU index:
+#   pip3 install -r requirements-xpu.txt --index-url https://download.pytorch.org/whl/xpu
+# torch 2.15 is the line with correct XPU peak-memory reporting.
+# Do not install the archived intel_extension_for_pytorch package.
+torch==2.15.*
+torchvision
+torchaudio
