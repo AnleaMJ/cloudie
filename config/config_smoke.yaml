@@ -142,6 +142,11 @@ features:
 baselines:
   n_splits: 2
   seed: 7
+  # Validation per-class intervals. Each resample draws storms with replacement.
+  # The generator seed is baselines.seed. Rows are not resampled.
+  bootstrap_resamples: 1000
+  # List each storm inside a class that has fewer than 3 storms.
+  per_storm_breakdown: true
   regression_models: [mean, persistence, ridge, lr, knn, rf, xgboost, svr]
   classification_models: [mean, persistence, logreg, knn, rf, xgboost, svc]
   use_smote: true

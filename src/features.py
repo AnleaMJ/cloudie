@@ -509,7 +509,14 @@ def _temporal_defaults(spec: FeatureSpec) -> dict[str, float]:
     }
 
 
-_CARRIED_COLUMNS = ("timestamp", "relative_time_s", "source_split")
+# Optional frame labels. Copied when the manifest has them. Not model features.
+_CARRIED_COLUMNS = (
+    "timestamp",
+    "relative_time_s",
+    "source_split",
+    "wind_averaging",
+    "on_fix",
+)
 
 
 def _extract_path(task: tuple[str, FeatureSpec, float]) -> dict[str, float]:

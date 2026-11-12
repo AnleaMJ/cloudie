@@ -111,6 +111,12 @@ the same MAE inside each project class, and macro-F1 with per-class recall.
 Accuracy is not the headline. ADT, SATCON, and Dvorak columns are present
 and empty.
 
+The same validation rows are written to `per_class_metrics.csv`: RMSE, MAE,
+and bias in each project class, with row and storm counts and 95% intervals
+from a bootstrap that resamples storm IDs. The test split is not in that
+table. A class with fewer than 3 storms is marked `indicative (n_storms<3)`.
+When `on_fix` is present, the file also reports the rows on a best-track fix.
+
 The deep path adds `SimpleCNN`, ResNet-18, and the optional ConvLSTM. A
 smoke fit is not a row in the results table below.
 
