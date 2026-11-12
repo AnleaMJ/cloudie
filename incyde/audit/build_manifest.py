@@ -267,11 +267,19 @@ def write_exclusions(man: pd.DataFrame, path: Path) -> None:
     flagged = man[man.qc_flags.fillna("") != ""].copy()
     flagged["filename"] = flagged["file"].str.rsplit("/", n=1).str[-1]
     flagged["_orig"] = ~flagged.is_augmented
-    flagged["_s42"] = flagged.incyde_sequence.eq(42) & flagged.qc_flags.str.contains("wrong_date")
+    flagged["_s42"] = flagged.incyde_sequence.eq(42) & flagged.qc_flags.str.contains(
+        "wrong_date", na=False
+    )
+    # String true/false, not booleans, so a rebuild matches the committed CSV.
+    flagged["default_exclude"] = np.where(
+        flagged.qc_flags.str.contains("wrong_date_imd_daymonth_swap", na=False),
+        "true",
+        "false",
+    )
     ex = flagged.sort_values(
         ["_s42", "_orig", "incyde_sequence", "filename"],
         ascending=[False, False, True, True],
-    )[["filename", "qc_flags"]].rename(columns={"qc_flags": "qc_flag"})
+    )[["filename", "qc_flags", "default_exclude"]].rename(columns={"qc_flags": "qc_flag"})
     ex.to_csv(path, index=False)
 
 
