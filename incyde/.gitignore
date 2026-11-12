@@ -1,0 +1,7 @@
+# Local INCYDE data — never commit images, the zip, pickles, or the full manifest
+*.zip
+*.pkl
+*.jpg
+*.jpeg
+manifest.csv
+phash.csv
