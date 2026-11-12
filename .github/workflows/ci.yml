@@ -30,7 +30,7 @@ jobs:
       - name: Run model, sequence, training, Streamlit, and Space tests
         run: |
           set -o pipefail
-          pytest tests/test_model.py tests/test_sequences.py tests/test_train.py tests/test_predict.py tests/test_space_app.py -o addopts= -ra --tb=short --junitxml=pytest-torch.xml | tee pytest-torch.txt
+          pytest tests/test_model.py tests/test_convlstm_smoke.py tests/test_sequences.py tests/test_train.py tests/test_predict.py tests/test_space_app.py -o addopts= -ra --tb=short --junitxml=pytest-torch.xml | tee pytest-torch.txt
       - name: Fail if any of these tests skipped
         run: |
           python - <<'PY'
@@ -39,12 +39,13 @@ jobs:
           from collections import defaultdict
 
           root = ET.parse("pytest-torch.xml").getroot()
-          rows = defaultdict(lambda: {"passed": 0, "skipped": 0, "failed": 0})
+          rows = defaultdict(lambda: {"passed": 0, "skipped": 0, "failed": 0, "seconds": 0.0})
           passed = skipped = failed = 0
           for case in root.iter("testcase"):
               classname = case.get("classname", "")
               module = ".".join(classname.split(".")[:2])
               rel = module.replace(".", "/") + ".py"
+              rows[rel]["seconds"] += float(case.get("time") or 0.0)
               tags = {child.tag for child in list(case)}
               if "skipped" in tags:
                   rows[rel]["skipped"] += 1
@@ -57,6 +58,7 @@ jobs:
                   passed += 1
           wanted = [
               "tests/test_model.py",
+              "tests/test_convlstm_smoke.py",
               "tests/test_sequences.py",
               "tests/test_train.py",
               "tests/test_predict.py",
@@ -67,7 +69,8 @@ jobs:
           for name in wanted:
               row = rows[name]
               print(
-                  f"{name}: {row['passed']} passed, {row['skipped']} skipped, {row['failed']} failed"
+                  f"{name}: {row['passed']} passed, {row['skipped']} skipped, "
+                  f"{row['failed']} failed, {row['seconds']:.2f}s"
               )
               if row["passed"] + row["skipped"] + row["failed"] == 0:
                   problems.append(f"{name} did not run")
