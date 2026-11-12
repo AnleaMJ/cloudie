@@ -16,6 +16,11 @@ the previous frame's best-track label, not the imagery. It is not a feature
 and it is not fit. Image-only models cannot be compared against it.
 ADT, SATCON, and Dvorak columns
 are left empty until those products are actually joined.
+
+Regression scores also write ``per_class_metrics.csv`` on the validation
+split only. Intervals resample storm IDs. A ``wind_averaging`` column is
+grouped when present. An ``on_fix`` column adds the rows on a best-track
+fix. The test split is not scored in that table.
 """
 
 from __future__ import annotations
@@ -128,6 +133,55 @@ class MostFrequentClassifier(BaseEstimator, ClassifierMixin):
 
 
 _MAJORITY_CLASSIFIERS = frozenset({"most_frequent", "mean"})
+PER_CLASS_COLUMNS = (
+    "task",
+    "model",
+    "split",
+    "subset",
+    "wind_averaging",
+    "row_kind",
+    "intensity_class",
+    "storm_id",
+    "n_rows",
+    "n_storms",
+    "rmse_kt",
+    "mae_kt",
+    "bias_kt",
+    "rmse_kt_ci_low",
+    "rmse_kt_ci_high",
+    "mae_kt_ci_low",
+    "mae_kt_ci_high",
+    "bias_kt_ci_low",
+    "bias_kt_ci_high",
+    "ci_level",
+    "n_resamples",
+    "seed",
+    "resample",
+    "status",
+    "quote_as_result",
+    "synthetic",
+)
+_PER_CLASS_MD_COLUMNS = (
+    "model",
+    "subset",
+    "wind_averaging",
+    "row_kind",
+    "intensity_class",
+    "storm_id",
+    "n_rows",
+    "n_storms",
+    "rmse_kt",
+    "rmse_kt_ci_low",
+    "rmse_kt_ci_high",
+    "mae_kt",
+    "mae_kt_ci_low",
+    "mae_kt_ci_high",
+    "bias_kt",
+    "bias_kt_ci_low",
+    "bias_kt_ci_high",
+    "status",
+    "quote_as_result",
+)
 _MARKDOWN_COLUMNS = (
     "task",
     "model",
@@ -227,6 +281,8 @@ _BASELINE_KEYS = (
     "xgb_max_depth",
     "xgb_learning_rate",
     "max_iter",
+    "bootstrap_resamples",
+    "per_storm_breakdown",
 )
 
 
@@ -590,10 +646,11 @@ def _persistence_cv(frame: pd.DataFrame, task: str, params: dict) -> tuple[float
 
 
 def _format_cell(value: object) -> str:
-    if isinstance(value, float):
-        if not np.isfinite(value):
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        if not np.isfinite(number):
             return ""
-        return f"{value:.4f}"
+        return f"{number:.4f}"
     try:
         if pd.isna(value):
             return ""
@@ -637,6 +694,8 @@ def write_comparison_files(
         "Learned models are sklearn pipelines. SMOTE and class weights stay inside the training fold.",
         "The official competition side, when present, stays in `source_split`.",
         "`quote_as_result` is no. This is not a forecast and not an operational-readiness claim.",
+        "Per-class validation RMSE, MAE, and bias are in `per_class_metrics.csv`.",
+        "Those intervals resample storm IDs. The test split is not in that table.",
         "",
     ]
     if metadata:
@@ -659,6 +718,9 @@ def write_comparison_files(
             "Official competition labels stay in `source_split`. The modeling split is storm-wise.",
             "The test split was not fit. `quote_as_result` is no.",
             PERSISTENCE_NOTE,
+            "Per-class validation metrics are in `per_class_metrics.csv`. Intervals resample storm IDs. The test split is not scored there.",
+            "A `wind_averaging` column, when present, is grouped and not converted. An `on_fix` column, when present, adds rows on a best-track fix.",
+            "Classes with fewer than 3 storms are marked indicative (n_storms<3).",
             "",
         ]
         for key, value in metadata.items():
@@ -666,6 +728,101 @@ def write_comparison_files(
         record.append("")
         (destination / "RUN.md").write_text("\n".join(record), encoding="utf-8")
     return comparison
+
+
+def write_per_class_files(destination: Path, rows: list[dict]) -> pd.DataFrame:
+    """Write the validation per-class table. Numbers stay ``quote_as_result=no``."""
+    frame = pd.DataFrame(rows, columns=list(PER_CLASS_COLUMNS))
+    if not frame.empty:
+        if not frame["split"].astype(str).eq("val").all():
+            raise LeakageError("per-class table contains a split other than val")
+        frame["quote_as_result"] = "no"
+    destination.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(destination / "per_class_metrics.csv", index=False)
+    lines = [
+        "# Per-class validation metrics",
+        "",
+        BANNER,
+        "",
+        "Validation split only. The test split was not scored.",
+        "Bias is prediction minus true wind.",
+        "Intervals are 95% percentile bootstrap confidence intervals.",
+        "Each resample draws storm IDs with replacement and keeps every row of a drawn storm.",
+        "Rows are not resampled on their own.",
+        "Bins are this project's grouping, IMD-style names, not an IMD warning.",
+        "A `wind_averaging` column, when present, is copied through and grouped. Periods are not converted.",
+        "An `on_fix` column, when present, adds `subset=on_fix` for rows on a best-track fix.",
+        "Classes with fewer than 3 storms are marked `indicative (n_storms<3)`.",
+        "When per-storm breakdown is on, those classes also list each storm.",
+        "`quote_as_result` is no. This is not a forecast and not an operational-readiness claim.",
+        "",
+    ]
+    if frame.empty:
+        lines.extend(["No regression validation rows were scored.", ""])
+    else:
+        lines.extend([_markdown_table(frame, _PER_CLASS_MD_COLUMNS), ""])
+    (destination / "per_class_metrics.md").write_text("\n".join(lines), encoding="utf-8")
+    return frame
+
+
+def _bootstrap_settings(params: dict) -> tuple[int, int, bool]:
+    resamples = params["bootstrap_resamples"]
+    if isinstance(resamples, bool) or not isinstance(resamples, (int, np.integer)):
+        raise BaselineDataError("bootstrap_resamples must be a positive integer")
+    n_resamples = int(resamples)
+    if n_resamples < 1:
+        raise BaselineDataError("bootstrap_resamples must be a positive integer")
+    breakdown = params["per_storm_breakdown"]
+    if not isinstance(breakdown, bool):
+        raise BaselineDataError("per_storm_breakdown must be true or false")
+    return n_resamples, int(params["seed"]), breakdown
+
+
+def _record_regression_classes(
+    rows: list[dict],
+    model_name: str,
+    frame: pd.DataFrame,
+    predicted: np.ndarray,
+    *,
+    n_resamples: int,
+    seed: int,
+    synthetic: str,
+    per_storm_breakdown: bool,
+) -> None:
+    """Score one regression model on the validation rows it was given."""
+    from src.evaluate import intensity_class_evaluation
+
+    if "split" not in frame.columns:
+        raise BaselineDataError("per-class evaluation needs a split column")
+    if len(frame) != len(np.asarray(predicted)):
+        raise BaselineDataError("per-class predictions must align with the validation rows")
+    observed = set(frame["split"].astype(str).unique())
+    if observed - {"val"}:
+        raise LeakageError(
+            "per-class evaluation scores the validation split only; "
+            f"refusing {sorted(observed - {'val'})}"
+        )
+    table = intensity_class_evaluation(
+        frame["wind_speed_kt"].to_numpy(dtype=np.float64),
+        np.asarray(predicted, dtype=np.float64),
+        frame["storm_id"].to_numpy(),
+        frame["imd5_class"].to_numpy(),
+        frame["split"].astype(str).to_numpy(),
+        wind_averaging=(
+            frame["wind_averaging"].to_numpy() if "wind_averaging" in frame.columns else None
+        ),
+        on_fix=frame["on_fix"].to_numpy() if "on_fix" in frame.columns else None,
+        n_resamples=n_resamples,
+        seed=seed,
+        per_storm_breakdown=per_storm_breakdown,
+    )
+    for record in table.to_dict(orient="records"):
+        record["task"] = "regression"
+        record["model"] = model_name
+        record["split"] = "val"
+        record["quote_as_result"] = "no"
+        record["synthetic"] = synthetic
+        rows.append(record)
 
 
 def _score_persistence(
@@ -676,6 +833,7 @@ def _score_persistence(
     synthetic: str,
     n_features: int,
     destination: Path,
+    class_rows: list[dict] | None = None,
 ) -> dict:
     """Score the previous same-storm wind. Nothing is fit and val storms stay out."""
     cv_mean, cv_std, cv_note = _persistence_cv(train, task, params)
@@ -718,6 +876,19 @@ def _score_persistence(
             destination / "scatter_persistence.png",
             title="persistence val scatter — not a forecast",
         )
+        if class_rows is not None:
+            n_resamples, seed, breakdown = _bootstrap_settings(params)
+            scored = val.iloc[np.flatnonzero(val_mask)]
+            _record_regression_classes(
+                class_rows,
+                "persistence",
+                scored,
+                predicted,
+                n_resamples=n_resamples,
+                seed=seed,
+                synthetic=synthetic,
+                per_storm_breakdown=breakdown,
+            )
         return row
     train_truth = train["imd5_class"].astype(object).to_numpy()
     val_truth = val["imd5_class"].astype(object).to_numpy()
@@ -781,6 +952,7 @@ def run_baselines(
         raise BaselineDataError("need at least 3 training storms")
 
     params = baseline_params(config)
+    n_resamples, bootstrap_seed, per_storm_breakdown = _bootstrap_settings(params)
     choose = selection_params(config)
     selection = select_features(
         train,
@@ -803,16 +975,25 @@ def run_baselines(
     synthetic = _synthetic_flag(frame)
     fitted: set[str] = set()
     rows: list[dict] = []
+    class_rows: list[dict] = []
 
     for model_name in list(params["regression_models"]):
         logger.info("Regression baseline %s", model_name)
         if model_name == "persistence":
             rows.append(
                 _score_persistence(
-                    train, val, "regression", params, synthetic, len(selected), destination
+                    train,
+                    val,
+                    "regression",
+                    params,
+                    synthetic,
+                    len(selected),
+                    destination,
+                    class_rows,
                 )
             )
             write_comparison_files(destination, rows, metadata)
+            write_per_class_files(destination, class_rows)
             continue
         if model_name == "xgboost" and not xgboost_available():
             rows.append(_empty_metric_row("regression", model_name, "not_installed", synthetic, len(selected)))
@@ -860,7 +1041,18 @@ def run_baselines(
             destination / f"scatter_{model_name}.png",
             title=f"{model_name} val scatter — not a forecast",
         )
+        _record_regression_classes(
+            class_rows,
+            model_name,
+            val,
+            predicted,
+            n_resamples=n_resamples,
+            seed=bootstrap_seed,
+            synthetic=synthetic,
+            per_storm_breakdown=per_storm_breakdown,
+        )
         write_comparison_files(destination, rows, metadata)
+        write_per_class_files(destination, class_rows)
 
     train_cls = train[train["imd5_class"].notna()].copy()
     val_cls = val[val["imd5_class"].notna()].copy()
@@ -930,6 +1122,7 @@ def run_baselines(
         write_comparison_files(destination, rows, metadata)
 
     comparison = write_comparison_files(destination, rows, metadata)
+    write_per_class_files(destination, class_rows)
     payload = {
         "source_split": selection.source_split,
         "names": list(selection.names),
@@ -1040,6 +1233,10 @@ def _run_metadata(
         "modeling_split": _count_block(assigned, "split"),
         "dropped_cross_split_links": str(int(dropped)),
         "use_smote": str(bool(config["baselines"]["use_smote"])),
+        "bootstrap_resamples": str(int(config["baselines"]["bootstrap_resamples"])),
+        "per_storm_breakdown": str(bool(config["baselines"]["per_storm_breakdown"])),
+        "per_class_eval_split": "val",
+        "per_class_resample": "storm_id",
         "quote_as_result": "no",
         "official_split_used_for_training": "no",
     }
@@ -1223,7 +1420,9 @@ def main(argv: list[str] | None = None) -> None:
     print(BANNER)
     print(f"Wrote {report.out_dir / 'baseline_comparison.csv'}")
     print(f"Wrote {report.out_dir / 'baseline_comparison.md'}")
-    print("quote_as_result=no for every row. Test storms were not fit.")
+    print(f"Wrote {report.out_dir / 'per_class_metrics.csv'}")
+    print(f"Wrote {report.out_dir / 'per_class_metrics.md'}")
+    print("quote_as_result=no for every row. Test storms were not fit or scored.")
 
 
 if __name__ == "__main__":

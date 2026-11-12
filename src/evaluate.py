@@ -20,6 +20,17 @@ scored on test storms. A coverage gap larger than the tolerance is labeled
 ``uncalibrated``. ``quote_as_result`` stays ``no``. This is not a forecast
 and not an operational-readiness claim.
 
+``intensity_class_evaluation`` scores regression predictions on the
+validation split only. It reports RMSE, MAE, and bias (prediction minus
+true wind) overall and in each project intensity bin, with row counts,
+distinct storm counts, and 95% percentile intervals from a bootstrap that
+resamples storm IDs. Test rows are refused. A ``wind_averaging`` column is
+copied through and grouped when it is present. An ``on_fix`` column, when
+present, adds the same table on rows whose label sits on a best-track fix.
+Classes with fewer than 3 storms are marked indicative. ``evaluate`` still
+scores the test storms with point metrics and does not run this bootstrap
+on them.
+
 Checkpoint scoring stays in ``cloudie.evaluate``.
 """
 
@@ -39,7 +50,12 @@ import pandas as pd
 from src.baselines import baseline_params, fit_numeric_pipeline, persistence_predictions
 from src.config import load_config
 from src.features import model_matrix
-from src.metrics import mean_baseline, metrics_by_class, regression_metrics
+from src.metrics import (
+    mean_baseline,
+    metrics_by_class,
+    regression_metrics,
+    storm_bootstrap_metrics,
+)
 from src.plots import save_regression_scatter
 from src.schema import (
     DEFAULT_EDGES_KT,
@@ -56,6 +72,33 @@ from src.splits import (
 )
 
 BINNING_LABEL = "our own grouping, IMD-style names"
+INDICATIVE_STATUS = "indicative (n_storms<3)"
+_SMALL_CLASS_STORMS = 3
+_ON_FIX_TRUE = frozenset({"1", "true", "yes", "y", "t"})
+_ON_FIX_FALSE = frozenset({"0", "false", "no", "n", "f"})
+_CLASS_TABLE_COLUMNS = (
+    "wind_averaging",
+    "subset",
+    "row_kind",
+    "intensity_class",
+    "storm_id",
+    "n_rows",
+    "n_storms",
+    "rmse_kt",
+    "mae_kt",
+    "bias_kt",
+    "rmse_kt_ci_low",
+    "rmse_kt_ci_high",
+    "mae_kt_ci_low",
+    "mae_kt_ci_high",
+    "bias_kt_ci_low",
+    "bias_kt_ci_high",
+    "ci_level",
+    "n_resamples",
+    "seed",
+    "resample",
+    "status",
+)
 HIGHLIGHT_CODES = ("VSCS", "ESCS_SUCS")
 HIGHLIGHT_DISPLAY = {"VSCS": "VSCS", "ESCS_SUCS": "ESCS/SuCS"}
 WIND_AVERAGING_NOTE = (
@@ -192,6 +235,313 @@ def score_winds(
         "highlight": _highlight(by_bin),
         "n_below_lowest_edge": below,
     }
+
+
+def _missing_label(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    if missing is True:
+        return True
+    if isinstance(missing, np.ndarray):
+        return False
+    return bool(missing)
+
+
+def _parse_on_fix(value: object) -> bool:
+    """Explicit true or false. Null and unrecognized values raise."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if _missing_label(value):
+        raise ValueError("on_fix is null; each row must be an explicit true or false")
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _ON_FIX_TRUE:
+            return True
+        if text in _ON_FIX_FALSE:
+            return False
+        raise ValueError(f"on_fix value {value!r} is not an explicit true or false")
+    item = getattr(value, "item", None)
+    if callable(item) and not isinstance(value, (str, bytes, bool)):
+        try:
+            unpacked = item()
+        except (TypeError, ValueError):
+            unpacked = value
+        else:
+            if type(unpacked) is not type(value):
+                return _parse_on_fix(unpacked)
+    if isinstance(value, (int, np.integer)) and not isinstance(value, bool):
+        if int(value) in (0, 1):
+            return bool(int(value))
+        raise ValueError(f"on_fix value {value!r} is not an explicit true or false")
+    if isinstance(value, float) and value in (0.0, 1.0):
+        return bool(value)
+    raise ValueError(f"on_fix value {value!r} is not an explicit true or false")
+
+
+def _on_fix_mask(values: np.ndarray | None, n_rows: int) -> np.ndarray | None:
+    if values is None:
+        return None
+    raw = np.asarray(values, dtype=object).ravel()
+    if raw.size != n_rows:
+        raise ValueError("on_fix must align with y_true")
+    return np.asarray([_parse_on_fix(value) for value in raw.tolist()], dtype=bool)
+
+
+def _require_validation_split(splits: np.ndarray, n_rows: int) -> None:
+    labels = np.asarray(splits, dtype=object).ravel()
+    if labels.size != n_rows:
+        raise ValueError("splits must align with y_true")
+    refused = sorted({str(value) for value in labels.tolist()} - {"val"})
+    if refused:
+        raise LeakageError(
+            "intensity-class evaluation scores the validation split only; "
+            f"refusing {refused}"
+        )
+
+
+def _class_labels(classes: np.ndarray, n_rows: int) -> np.ndarray:
+    raw = np.asarray(classes, dtype=object).ravel()
+    if raw.size != n_rows:
+        raise ValueError("classes must align with y_true")
+    labels = np.empty(n_rows, dtype=object)
+    for index, value in enumerate(raw.tolist()):
+        labels[index] = None if _missing_label(value) else str(value)
+    return labels
+
+
+def _averaging_blocks(
+    n_rows: int, wind_averaging: np.ndarray | None
+) -> list[tuple[object, np.ndarray]]:
+    """One block when the column is absent. Otherwise group, without converting."""
+    if wind_averaging is None:
+        return [(None, np.arange(n_rows, dtype=np.int64))]
+    raw = np.asarray(wind_averaging, dtype=object).ravel()
+    if raw.size != n_rows:
+        raise ValueError("wind_averaging must align with y_true")
+    order: list[object] = []
+    buckets: dict[object, list[int]] = {}
+    for index, value in enumerate(raw.tolist()):
+        key: object = None if _missing_label(value) else str(value)
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(index)
+    if not order and n_rows == 0:
+        return [(None, np.zeros(0, dtype=np.int64))]
+    return [(key, np.asarray(buckets[key], dtype=np.int64)) for key in order]
+
+
+def _class_names_in_order(labels: np.ndarray, class_names: Sequence[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for name in class_names:
+        key = str(name)
+        if key not in seen:
+            ordered.append(key)
+            seen.add(key)
+    for label in labels.tolist():
+        if label is None or label in seen:
+            continue
+        ordered.append(str(label))
+        seen.add(str(label))
+    return ordered
+
+
+def _empty_class_metrics(n_resamples: int, seed: int, ci_level: float) -> dict[str, object]:
+    return {
+        "n_rows": 0,
+        "n_storms": 0,
+        "rmse_kt": np.nan,
+        "mae_kt": np.nan,
+        "bias_kt": np.nan,
+        "rmse_kt_ci_low": np.nan,
+        "rmse_kt_ci_high": np.nan,
+        "mae_kt_ci_low": np.nan,
+        "mae_kt_ci_high": np.nan,
+        "bias_kt_ci_low": np.nan,
+        "bias_kt_ci_high": np.nan,
+        "ci_level": float(ci_level),
+        "n_resamples": int(n_resamples),
+        "seed": int(seed),
+        "resample": "storm_id",
+        "status": "",
+    }
+
+
+def _metric_record(
+    truth: np.ndarray,
+    pred: np.ndarray,
+    storm_ids: np.ndarray,
+    *,
+    wind_averaging: object,
+    subset: str,
+    row_kind: str,
+    intensity_class: str,
+    storm_id: object,
+    n_resamples: int,
+    seed: int,
+    ci_level: float,
+) -> dict[str, object]:
+    if truth.size == 0:
+        metrics: dict[str, object] = _empty_class_metrics(n_resamples, seed, ci_level)
+    else:
+        metrics = dict(
+            storm_bootstrap_metrics(
+                truth,
+                pred,
+                storm_ids,
+                n_resamples=n_resamples,
+                seed=seed,
+                ci_level=ci_level,
+            )
+        )
+        n_storms = int(metrics["n_storms"])
+        metrics["status"] = (
+            INDICATIVE_STATUS if 0 < n_storms < _SMALL_CLASS_STORMS else ""
+        )
+    metrics.update(
+        {
+            "wind_averaging": np.nan if wind_averaging is None else wind_averaging,
+            "subset": subset,
+            "row_kind": row_kind,
+            "intensity_class": intensity_class,
+            "storm_id": np.nan if storm_id is None else storm_id,
+        }
+    )
+    return metrics
+
+
+def _storm_ids_in_order(storm_ids: np.ndarray) -> list[str]:
+    seen: dict[str, None] = {}
+    for storm in np.asarray(storm_ids, dtype=object).ravel().tolist():
+        seen.setdefault(str(storm), None)
+    return list(seen)
+
+
+def intensity_class_evaluation(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    storm_ids: np.ndarray,
+    classes: np.ndarray,
+    splits: np.ndarray,
+    *,
+    wind_averaging: np.ndarray | None = None,
+    on_fix: np.ndarray | None = None,
+    class_names: Sequence[str] = DEFAULT_NAMES,
+    n_resamples: int = 1000,
+    seed: int = 0,
+    ci_level: float = 0.95,
+    per_storm_breakdown: bool = True,
+) -> pd.DataFrame:
+    """Validation RMSE, MAE, and bias by this project's intensity bins.
+
+    Bias is prediction minus true wind. Intervals resample storm IDs. The
+    default is 1000 resamples and a 95% percentile interval. ``splits`` must
+    be ``val`` on every row.
+
+    ``classes`` are the existing project labels, usually ``imd5_class``.
+    Every configured bin is reported. A bin with no rows keeps null errors.
+    Unlabeled rows stay in the overall line only.
+
+    ``wind_averaging``, when given, is copied onto the table and the metrics
+    are computed inside each distinct period. Periods are not converted and
+    mixed periods are not pooled. Omit it when the column is absent.
+
+    ``on_fix``, when given, must be an explicit boolean per row. The table
+    then also contains ``subset='on_fix'``, restricted to rows on a
+    best-track fix. ``subset='all'`` is always reported.
+
+    A class with at least one row and fewer than 3 storms is marked
+    ``indicative (n_storms<3)``. The same mark is applied to an overall
+    line with fewer than 3 storms. When ``per_storm_breakdown`` is true,
+    each such class also lists one row per storm.
+    """
+    if not isinstance(per_storm_breakdown, bool):
+        raise ValueError("per_storm_breakdown must be true or false")
+    truth = np.asarray(y_true, dtype=np.float64).ravel()
+    pred = np.asarray(y_pred, dtype=np.float64).ravel()
+    if truth.shape != pred.shape:
+        raise ValueError("y_true and y_pred must be the same shape")
+    if truth.size and (not np.isfinite(truth).all() or not np.isfinite(pred).all()):
+        raise ValueError("y_true and y_pred must be finite")
+    n_rows = int(truth.size)
+    _require_validation_split(splits, n_rows)
+    ids = np.asarray(storm_ids, dtype=object).ravel()
+    if ids.size != n_rows:
+        raise ValueError("storm_ids must align with y_true")
+    labels = _class_labels(classes, n_rows)
+    fix_mask = _on_fix_mask(on_fix, n_rows)
+    if not class_names:
+        raise ValueError("at least one intensity class name is required")
+    rows: list[dict[str, object]] = []
+    for period, positions in _averaging_blocks(n_rows, wind_averaging):
+        subsets = [("all", positions)]
+        if fix_mask is not None:
+            subsets.append(("on_fix", positions[fix_mask[positions]]))
+        for subset, index in subsets:
+            slice_truth = truth[index]
+            slice_pred = pred[index]
+            slice_storms = ids[index]
+            slice_labels = labels[index]
+            overall = _metric_record(
+                slice_truth,
+                slice_pred,
+                slice_storms,
+                wind_averaging=period,
+                subset=subset,
+                row_kind="overall",
+                intensity_class="overall",
+                storm_id=None,
+                n_resamples=n_resamples,
+                seed=seed,
+                ci_level=ci_level,
+            )
+            rows.append(overall)
+            for name in _class_names_in_order(slice_labels, class_names):
+                chosen = np.flatnonzero(slice_labels == name)
+                class_row = _metric_record(
+                    slice_truth[chosen],
+                    slice_pred[chosen],
+                    slice_storms[chosen],
+                    wind_averaging=period,
+                    subset=subset,
+                    row_kind="class",
+                    intensity_class=name,
+                    storm_id=None,
+                    n_resamples=n_resamples,
+                    seed=seed,
+                    ci_level=ci_level,
+                )
+                rows.append(class_row)
+                n_storms = int(class_row["n_storms"])
+                if per_storm_breakdown and 0 < n_storms < _SMALL_CLASS_STORMS:
+                    class_storms = slice_storms[chosen]
+                    class_truth = slice_truth[chosen]
+                    class_pred = slice_pred[chosen]
+                    for storm in _storm_ids_in_order(class_storms):
+                        storm_index = np.flatnonzero(
+                            np.asarray([str(item) for item in class_storms.tolist()]) == storm
+                        )
+                        rows.append(
+                            _metric_record(
+                                class_truth[storm_index],
+                                class_pred[storm_index],
+                                class_storms[storm_index],
+                                wind_averaging=period,
+                                subset=subset,
+                                row_kind="storm",
+                                intensity_class=name,
+                                storm_id=storm,
+                                n_resamples=n_resamples,
+                                seed=seed,
+                                ci_level=ci_level,
+                            )
+                        )
+    return pd.DataFrame(rows, columns=list(_CLASS_TABLE_COLUMNS))
 
 
 def mc_dropout_intervals(

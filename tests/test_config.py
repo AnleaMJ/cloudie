@@ -73,6 +73,8 @@ REQUIRED = {
         "xgb_max_depth",
         "xgb_learning_rate",
         "max_iter",
+        "bootstrap_resamples",
+        "per_storm_breakdown",
     ],
 }
 SELECTION_KEYS = [

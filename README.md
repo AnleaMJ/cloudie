@@ -51,6 +51,14 @@ Leak-free splits and quality gates (Phase 0–1), then classical baselines
 - inner `StratifiedGroupKFold` on training storms, SMOTE inside those
   training folds only, and a single score on the validation storms
 - the test split is not used for selection, resampling, or fitting
+- validation RMSE, MAE, and bias (prediction minus true wind) overall and
+  inside each project intensity class, with the row count, the distinct
+  storm count, and 95% bootstrap intervals that resample storm IDs
+- classes with fewer than 3 storms marked `indicative (n_storms<3)`, with
+  an optional per-storm breakdown
+- a `wind_averaging` column, when present, copied through and grouped, and
+  an `on_fix` column, when present, adding the same table for rows on a
+  best-track fix
 
 `python -m src.evaluate` scores a supplied prediction column on storm-held-out
 test rows. It reports MAE, RMSE, and bias overall and inside our own grouping,
@@ -111,8 +119,10 @@ torchvision, Streamlit, and Gradio and runs those tests, including the
 Space page tests. Neither job downloads NASA, TCIR, or TorchGeo imagery.
 
 The baseline command writes `reports/smoke/baselines/`. That directory is
-gitignored. The CSV has `quote_as_result=no` on every row. Read
-`reports/smoke/baselines/README.txt` before looking at a number.
+gitignored. The CSV has `quote_as_result=no` on every row. The same run
+writes `per_class_metrics.csv` and `per_class_metrics.md` for the validation
+split only. Read `reports/smoke/baselines/README.txt` before looking at a
+number.
 
 A smoke training check needs the train extras. It does not produce a score
 to quote, and it overwrites `data/smoke` with the `cloudie` synthetic set:
