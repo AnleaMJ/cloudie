@@ -168,7 +168,10 @@ features:
     n_estimators: 80
     seed: 42
 baselines:
-  n_splits: 3
+  # Five folds, seed 42, groups dealt round-robin. The file
+  # results/incyde_baselines/cv_folds.csv is storm_id,fold for train+val
+  # only, and each cooccurrence_group stays in one fold.
+  n_splits: 5
   seed: 42
   # Validation per-class intervals. Each resample draws storms with replacement.
   # The generator seed is baselines.seed. Rows are not resampled.
@@ -194,4 +197,5 @@ baselines:
   # sits in fewer groups than n_splits, for fold assignment only.
   cv_pool: train_val
   cv_group_column: cv_group
-  cv_collapse_rare: true
+  cv_collapse_rare: false
+  cv_assign: round_robin

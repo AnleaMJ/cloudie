@@ -81,6 +81,7 @@ REQUIRED = {
         "cv_pool",
         "cv_group_column",
         "cv_collapse_rare",
+        "cv_assign",
     ],
 }
 SELECTION_KEYS = [

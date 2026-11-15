@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 from PIL import Image
 
-from src.incyde import (
+from incyde.manifest import (
     RAW_3MIN_METRICS,
     ZIP_MD5,
     IncydeDataError,
@@ -131,7 +131,7 @@ def test_bad_md5_stops_before_a_manifest(tmp_path: Path) -> None:
 
 
 def test_loader_source_does_not_build_year_holdout() -> None:
-    text = Path(__file__).resolve().parents[1].joinpath("src", "incyde.py").read_text(encoding="utf-8")
+    text = Path(__file__).resolve().parents[1].joinpath("incyde", "manifest.py").read_text(encoding="utf-8")
     assert "def year_holdout" not in text
     assert "download=True" not in text
     assert "requests.get" not in text

@@ -195,3 +195,4 @@ baselines:
   cv_pool: train
   cv_group_column: storm_id
   cv_collapse_rare: false
+  cv_assign: stratified

@@ -293,6 +293,7 @@ _BASELINE_KEYS = (
     "cv_pool",
     "cv_group_column",
     "cv_collapse_rare",
+    "cv_assign",
 )
 
 
@@ -398,6 +399,90 @@ def collapse_rare_stratify_labels(
         f"{label}->{host}" for label in sorted(str(label) for label in rare)
     )
     return collapsed, note
+
+
+def _require_cv_assign(params: dict) -> str:
+    method = params["cv_assign"]
+    if not isinstance(method, str) or method.strip().lower() not in {"stratified", "round_robin"}:
+        raise BaselineDataError("cv_assign must be stratified or round_robin")
+    return method.strip().lower()
+
+
+def round_robin_group_folds(frame: pd.DataFrame, params: dict) -> pd.DataFrame:
+    """Train+val storms only. One row per storm: ``storm_id``, ``fold``.
+
+    Co-occurrence groups are sorted, shuffled with ``baselines.seed``, and
+    dealt round-robin across ``n_splits`` folds. Every storm in a group
+    gets that group's fold. Test storms are omitted. This is the same deal
+    as a seed-42 group shuffle with the configured fold count.
+    """
+    if _require_cv_pool(params) != "train_val":
+        raise BaselineDataError("round_robin folds are assigned on train and val only")
+    column = str(params["cv_group_column"]).strip()
+    if column not in frame.columns:
+        raise BaselineDataError(f"cv_group_column {column} is not on the frame")
+    n_folds = int(params["n_splits"])
+    if n_folds < 2:
+        raise BaselineDataError("n_splits must be at least 2")
+    pool = frame.loc[frame["split"].astype(str).isin(["train", "val"])].copy()
+    if pool.empty:
+        raise BaselineDataError("round_robin folds need train and val rows")
+    storms = pool.groupby(pool["storm_id"].astype(str), as_index=False).agg(
+        group=(column, "first"),
+        split=("split", "first"),
+    )
+    if storms.groupby("storm_id")["split"].nunique().max() > 1:
+        raise LeakageError("a storm is in more than one split")
+    per_group = storms.groupby(storms["group"].map(lambda value: str(int(value))))["split"].nunique()
+    if bool((per_group > 1).any()):
+        raise LeakageError("a co-occurrence group is in more than one split")
+    groups = sorted({int(value) for value in storms["group"].tolist()})
+    order = np.random.default_rng(int(params["seed"])).permutation(len(groups))
+    shuffled = [groups[int(index)] for index in order]
+    group_fold = {group: index % n_folds for index, group in enumerate(shuffled)}
+    folds = pd.DataFrame(
+        {
+            "storm_id": storms["storm_id"].astype(str).tolist(),
+            "fold": [int(group_fold[int(value)]) for value in storms["group"].tolist()],
+        }
+    )
+    test_ids = set(frame.loc[frame["split"].astype(str) == "test", "storm_id"].astype(str))
+    if set(folds["storm_id"]) & test_ids:
+        raise LeakageError("round_robin folds include a test storm")
+    return folds.sort_values(["fold", "storm_id"]).reset_index(drop=True)[["storm_id", "fold"]]
+
+
+def attach_round_robin_folds(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Add ``cv_fold`` on train and val rows. The returned table is the CSV."""
+    folds = round_robin_group_folds(frame, params)
+    work = frame.copy()
+    work["storm_id"] = work["storm_id"].astype(str)
+    if "cv_fold" in work.columns:
+        work = work.drop(columns=["cv_fold"])
+    work = work.merge(folds, on="storm_id", how="left")
+    work = work.rename(columns={"fold": "cv_fold"})
+    held = work["split"].astype(str).isin(["train", "val"])
+    if work.loc[held, "cv_fold"].isna().any():
+        raise BaselineDataError("a train or val storm has no cv_fold")
+    if work.loc[work["split"].astype(str) == "test", "cv_fold"].notna().any():
+        raise LeakageError("a test storm was given a cv_fold")
+    return work, folds
+
+
+def _preassigned_folds(frame: pd.DataFrame) -> list[tuple[np.ndarray, np.ndarray]] | None:
+    if "cv_fold" not in frame.columns or not frame["cv_fold"].notna().all():
+        return None
+    folds = frame["cv_fold"].astype(int).to_numpy()
+    pairs = []
+    for fold in sorted(set(folds.tolist())):
+        val_index = np.flatnonzero(folds == fold)
+        train_index = np.flatnonzero(folds != fold)
+        if val_index.size == 0 or train_index.size == 0:
+            raise BaselineDataError(f"cv_fold {fold} does not leave both sides non-empty")
+        pairs.append((train_index, val_index))
+    if len(pairs) < 2:
+        raise BaselineDataError("cv_fold needs at least 2 folds")
+    return pairs
 
 
 def cv_pool_frame(
@@ -623,7 +708,18 @@ def _synthetic_flag(frame: pd.DataFrame) -> str:
     return "no"
 
 
-def _empty_metric_row(task: str, model: str, note: str, synthetic: str, n_features: int) -> dict:
+def _inner_cv_name(params: dict) -> str:
+    return "round_robin" if _require_cv_assign(params) == "round_robin" else "StratifiedGroupKFold"
+
+
+def _empty_metric_row(
+    task: str,
+    model: str,
+    note: str,
+    synthetic: str,
+    n_features: int,
+    inner_cv: str = "StratifiedGroupKFold",
+) -> dict:
     row = {column: np.nan for column in COMPARISON_COLUMNS}
     row.update(
         {
@@ -631,7 +727,7 @@ def _empty_metric_row(task: str, model: str, note: str, synthetic: str, n_featur
             "model": model,
             "role": REFERENCE_ROLE if model == "persistence" else IMAGE_ROLE,
             "split_protocol": "train_fit_val_score_test_locked",
-            "inner_cv": "StratifiedGroupKFold",
+            "inner_cv": inner_cv,
             "n_features": n_features,
             "fit_notes": note,
             "quote_as_result": "no",
@@ -656,26 +752,33 @@ def _cross_val(
     groups = _cv_group_ids(train, params)
     storms = train["storm_id"].astype(str).to_numpy()
     n_splits = int(params["n_splits"])
-    if task == "regression":
-        target = train["wind_speed_kt"].to_numpy(dtype=np.float64)
-        stratify = (
-            train["imd5_class"]
-            .astype(object)
-            .where(train["imd5_class"].notna(), "below")
-            .astype(str)
-            .to_numpy()
+    preassigned = _preassigned_folds(train)
+    collapse_note = ""
+    if preassigned is None:
+        if task == "regression":
+            stratify = (
+                train["imd5_class"]
+                .astype(object)
+                .where(train["imd5_class"].notna(), "below")
+                .astype(str)
+                .to_numpy()
+            )
+        else:
+            stratify = train["imd5_class"].astype(str).to_numpy()
+        stratify, collapse_note = collapse_rare_stratify_labels(
+            stratify, groups, n_splits, _require_cv_bool(params)
+        )
+        folds = list(
+            iter_stratified_group_folds(
+                stratify, groups, n_splits=n_splits, seed=int(params["seed"])
+            )
         )
     else:
+        folds = preassigned
+    if task == "regression":
+        target = train["wind_speed_kt"].to_numpy(dtype=np.float64)
+    else:
         target = train["imd5_class"].astype(str).to_numpy()
-        stratify = target
-    stratify, collapse_note = collapse_rare_stratify_labels(
-        stratify, groups, n_splits, _require_cv_bool(params)
-    )
-    folds = list(
-        iter_stratified_group_folds(
-            stratify, groups, n_splits=n_splits, seed=int(params["seed"])
-        )
-    )
     scores: list[float] = []
     notes: list[str] = []
     for fold_index, (train_index, val_index) in enumerate(folds):
@@ -701,7 +804,8 @@ def _cross_val(
             )
     pool = _require_cv_pool(params)
     column = str(params["cv_group_column"]).strip()
-    prefix = f"cv_pool:{pool};cv_group:{column}"
+    assign = _require_cv_assign(params)
+    prefix = f"cv_pool:{pool};cv_group:{column};cv_assign:{assign}"
     if collapse_note:
         prefix = f"{prefix};{collapse_note}"
     return float(np.mean(scores)), float(np.std(scores)), prefix + ";inner_cv:" + "|".join(notes)
@@ -727,22 +831,27 @@ def _persistence_metric(frame: pd.DataFrame, task: str) -> float | None:
 
 def _persistence_cv(frame: pd.DataFrame, task: str, params: dict) -> tuple[float, float, str]:
     groups = _cv_group_ids(frame, params)
-    stratify = (
-        frame["imd5_class"]
-        .astype(object)
-        .where(frame["imd5_class"].notna(), "below")
-        .astype(str)
-        .to_numpy()
-    )
     n_splits = int(params["n_splits"])
-    stratify, collapse_note = collapse_rare_stratify_labels(
-        stratify, groups, n_splits, _require_cv_bool(params)
-    )
-    folds = list(
-        iter_stratified_group_folds(
-            stratify, groups, n_splits=n_splits, seed=int(params["seed"])
+    preassigned = _preassigned_folds(frame)
+    collapse_note = ""
+    if preassigned is None:
+        stratify = (
+            frame["imd5_class"]
+            .astype(object)
+            .where(frame["imd5_class"].notna(), "below")
+            .astype(str)
+            .to_numpy()
         )
-    )
+        stratify, collapse_note = collapse_rare_stratify_labels(
+            stratify, groups, n_splits, _require_cv_bool(params)
+        )
+        folds = list(
+            iter_stratified_group_folds(
+                stratify, groups, n_splits=n_splits, seed=int(params["seed"])
+            )
+        )
+    else:
+        folds = preassigned
     scores: list[float] = []
     for train_index, val_index in folds:
         if set(groups[train_index]) & set(groups[val_index]):
@@ -752,7 +861,8 @@ def _persistence_cv(frame: pd.DataFrame, task: str, params: dict) -> tuple[float
             scores.append(score)
     pool = _require_cv_pool(params)
     column = str(params["cv_group_column"]).strip()
-    prefix = f"cv_pool:{pool};cv_group:{column}"
+    assign = _require_cv_assign(params)
+    prefix = f"cv_pool:{pool};cv_group:{column};cv_assign:{assign}"
     if collapse_note:
         prefix = f"{prefix};{collapse_note}"
     if not scores:
@@ -971,7 +1081,9 @@ def _score_persistence(
         "reference_baseline;previous_best_track_label;not_imagery;"
         f"previous_same_storm_wind;not_a_feature;no_pipeline;{cv_note}"
     )
-    row = _empty_metric_row(task, "persistence", note, synthetic, n_features)
+    row = _empty_metric_row(
+        task, "persistence", note, synthetic, n_features, inner_cv=_inner_cv_name(params)
+    )
     if task == "regression":
         train_pred = persistence_predictions(train)
         val_pred = persistence_predictions(val)
@@ -1107,6 +1219,13 @@ def run_baselines(
     cv_fitted: set[str] = set()
     pool = _require_cv_pool(params)
     cv_bucket = fitted if pool == "train" else cv_fitted
+    if _require_cv_assign(params) == "round_robin":
+        combined = pd.concat([train, val, test], ignore_index=True)
+        combined, fold_table = attach_round_robin_folds(combined, params)
+        fold_table.to_csv(destination / "cv_folds.csv", index=False)
+        train = combined.loc[combined["split"].astype(str) == "train"].reset_index(drop=True)
+        val = combined.loc[combined["split"].astype(str) == "val"].reset_index(drop=True)
+        test = combined.loc[combined["split"].astype(str) == "test"].reset_index(drop=True)
     cv_reg = cv_pool_frame(train, val, test, params)
     rows: list[dict] = []
     class_rows: list[dict] = []
@@ -1131,7 +1250,16 @@ def run_baselines(
             write_per_class_files(destination, class_rows)
             continue
         if model_name == "xgboost" and not xgboost_available():
-            rows.append(_empty_metric_row("regression", model_name, "not_installed", synthetic, len(selected)))
+            rows.append(
+                _empty_metric_row(
+                    "regression",
+                    model_name,
+                    "not_installed",
+                    synthetic,
+                    len(selected),
+                    inner_cv=_inner_cv_name(params),
+                )
+            )
             write_comparison_files(destination, rows, metadata)
             continue
         cv_mean, cv_std, cv_note = _cross_val(
@@ -1152,7 +1280,14 @@ def run_baselines(
         by_class = metrics_by_class(
             val["wind_speed_kt"].to_numpy(), predicted, val["imd5_class"].to_numpy()
         )
-        row = _empty_metric_row("regression", model_name, f"{note};{cv_note}", synthetic, len(selected))
+        row = _empty_metric_row(
+            "regression",
+            model_name,
+            f"{note};{cv_note}",
+            synthetic,
+            len(selected),
+            inner_cv=_inner_cv_name(params),
+        )
         row.update(
             {
                 "n_train_rows": int(len(train)),
@@ -1213,7 +1348,14 @@ def run_baselines(
             continue
         if model_name == "xgboost" and not xgboost_available():
             rows.append(
-                _empty_metric_row("classification", model_name, "not_installed", synthetic, len(selected))
+                _empty_metric_row(
+                    "classification",
+                    model_name,
+                    "not_installed",
+                    synthetic,
+                    len(selected),
+                    inner_cv=_inner_cv_name(params),
+                )
             )
             write_comparison_files(destination, rows, metadata)
             continue
@@ -1240,7 +1382,12 @@ def run_baselines(
             val_cls["imd5_class"].astype(str).to_numpy(), predicted, DEFAULT_NAMES
         )
         row = _empty_metric_row(
-            "classification", model_name, f"{note};{cv_note}", synthetic, len(selected)
+            "classification",
+            model_name,
+            f"{note};{cv_note}",
+            synthetic,
+            len(selected),
+            inner_cv=_inner_cv_name(params),
         )
         row.update(
             {
@@ -1429,6 +1576,7 @@ def _run_metadata(
         "cv_pool": str(config["baselines"]["cv_pool"]),
         "cv_group_column": str(config["baselines"]["cv_group_column"]),
         "cv_collapse_rare": str(bool(config["baselines"]["cv_collapse_rare"])),
+        "cv_assign": str(config["baselines"]["cv_assign"]),
         "workers": str(int(workers)),
         "rows": str(int(len(assigned))),
         "storms": str(int(assigned["storm_id"].nunique())),

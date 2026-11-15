@@ -20,6 +20,7 @@ from src.baselines import (
     persistence_class_predictions,
     persistence_predictions,
     resample_training_fold,
+    round_robin_group_folds,
     run_baselines,
     run_from_config,
     write_comparison_files,
@@ -57,6 +58,7 @@ def _params(**overrides):
             "cv_pool": "train",
             "cv_group_column": "storm_id",
             "cv_collapse_rare": False,
+            "cv_assign": "stratified",
             "regression_models": ["mean", "ridge"],
             "classification_models": ["most_frequent", "logreg"],
         },
@@ -648,3 +650,73 @@ def test_train_val_cv_keeps_cooccurrence_groups_together(tmp_path: Path, monkeyp
     assert report.comparison["fit_notes"].astype(str).str.contains("cv_pool:train_val").all()
     assert report.comparison["fit_notes"].astype(str).str.contains("cv_group:cv_group").all()
     assert set(pd.read_csv(tmp_path / "per_class_metrics.csv")["split"]) == {"val"}
+
+
+def test_round_robin_cv_folds_file_matches_seed_42(tmp_path: Path, monkeypatch) -> None:
+    storms = pd.read_csv(ROOT / "incyde" / "audit" / "storm_split.csv")
+    rows = []
+    for record in storms.itertuples(index=False):
+        for time_index in range(2):
+            rows.append(
+                {
+                    "sample_id": f"{record.storm_id}_{time_index}",
+                    "storm_id": record.storm_id,
+                    "split": record.proposed_split,
+                    "cv_group": str(int(record.cooccurrence_group)),
+                    "wind_speed_kt": 40.0 + time_index,
+                    "imd5_class": "CS",
+                    "is_synthetic": True,
+                    "f1": float(time_index),
+                    "f2": 1.0,
+                }
+            )
+    frame = pd.DataFrame(rows)
+    params = _params(
+        cv_pool="train_val",
+        cv_group_column="cv_group",
+        cv_assign="round_robin",
+        n_splits=5,
+        seed=42,
+    )["baselines"]
+    folds = round_robin_group_folds(frame, params)
+    assert list(folds.columns) == ["storm_id", "fold"]
+    pool = storms.loc[storms["proposed_split"].isin(["train", "val"])]
+    groups = sorted({int(value) for value in pool["cooccurrence_group"]})
+    order = np.random.default_rng(42).permutation(len(groups))
+    shuffled = [groups[int(index)] for index in order]
+    expected = {group: index % 5 for index, group in enumerate(shuffled)}
+    got = {
+        storm_id: int(fold)
+        for storm_id, fold in zip(folds["storm_id"], folds["fold"], strict=True)
+    }
+    for record in pool.itertuples(index=False):
+        assert got[record.storm_id] == expected[int(record.cooccurrence_group)]
+    test_ids = set(storms.loc[storms["proposed_split"] == "test", "storm_id"])
+    assert set(folds["storm_id"]).isdisjoint(test_ids)
+    assert len(folds) == len(pool)
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("round-robin CV must not call StratifiedGroupKFold")
+
+    monkeypatch.setattr("src.baselines.iter_stratified_group_folds", refuse)
+    tiny = frame.groupby("storm_id", as_index=False).head(1)
+    # Two rows per storm keeps persistence defined. Keep the full tiny table.
+    config = _params(
+        cv_pool="train_val",
+        cv_group_column="cv_group",
+        cv_assign="round_robin",
+        n_splits=5,
+        seed=42,
+        regression_models=["mean"],
+        classification_models=["most_frequent"],
+        bootstrap_resamples=4,
+        per_storm_breakdown=False,
+        use_smote=False,
+    )
+    run_baselines(frame, ["f1", "f2"], config, tmp_path)
+    written = pd.read_csv(tmp_path / "cv_folds.csv")
+    assert list(written.columns) == ["storm_id", "fold"]
+    assert written["storm_id"].tolist() == folds["storm_id"].tolist()
+    assert written["fold"].tolist() == folds["fold"].tolist()
+    assert "StratifiedGroupKFold" not in (tmp_path / "baseline_comparison.csv").read_text(encoding="utf-8")
+    del tiny

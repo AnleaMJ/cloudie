@@ -92,7 +92,7 @@ _SET_MAP = {
     "test": "test",
     "testing": "test",
 }
-AUDIT_DIR = Path(__file__).resolve().parents[1] / "incyde" / "audit"
+AUDIT_DIR = Path(__file__).resolve().parent / "audit"
 
 
 class IncydeDataError(ValueError):

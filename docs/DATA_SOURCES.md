@@ -52,7 +52,7 @@ Do not commit imagery or best-track dumps. CI must not download them.
   https://mausam.imd.gov.in/responsive/satellite.php when someone clicks
   it. That file is not committed, and tests do not download it.
   Cropped INCYDE IR is Zenodo 8015544 (`Cropped_cyclone_data.zip`,
-  MD5 `ed5dac254c689e5a327dee7580324347`). `python -m src.incyde` builds
+  MD5 `ed5dac254c689e5a327dee7580324347`). `python -m incyde.manifest` builds
   a local manifest from an already downloaded unzip and does not fetch
   it. CI must not download it. Labels stay raw IMD 3-minute winds
   (`wind_averaging=3-min`, `wind_averaging_s=180`) with no conversion.
