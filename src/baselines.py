@@ -1,13 +1,18 @@
 """Classical intensity baselines on storm-grouped, train-selected features.
 
-``run_from_config`` assigns storms with ``src.splits.assign_storms`` and
-accepts only ``storm_wise``. An official competition side stays in
-``source_split`` and is never the modeling split. Models are fit on train
-storms and scored on val storms. The test split is never passed to a fit call.
+``run_from_config`` assigns storms with ``src.splits.assign_storms`` when
+``split.strategy`` is ``storm_wise``. ``recorded`` keeps the ``split`` column
+already on the manifest and does not redraw it. An official competition side
+stays in ``source_split`` and is never the modeling split. Models are fit on
+train storms and scored on val storms. The test split is never passed to a
+headline fit and is never scored.
 
 Learned models are sklearn ``Pipeline`` objects. Inner ``StratifiedGroupKFold``
-groups on ``storm_id`` and is a comparison diagnostic on the training storms
-only. It is not a license to tune on the locked test storms.
+is a comparison diagnostic. The default pool is the training storms and the
+default group is ``storm_id``. ``baselines.cv_pool: train_val`` uses train and
+val together, still excluding test, and ``baselines.cv_group_column`` names
+the group that must stay inside one fold. It is not a license to tune on the
+locked test storms.
 
 SMOTE, when enabled, resamples the current training fold and never the
 validation rows. Otherwise those classifiers use class weights inside the
@@ -26,9 +31,11 @@ fix. The test split is not scored in that table.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import shlex
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -283,6 +290,9 @@ _BASELINE_KEYS = (
     "max_iter",
     "bootstrap_resamples",
     "per_storm_breakdown",
+    "cv_pool",
+    "cv_group_column",
+    "cv_collapse_rare",
 )
 
 
@@ -330,6 +340,92 @@ def iter_stratified_group_folds(y_strat, groups, n_splits: int, seed: int):
         n_splits=n_splits, shuffle=True, random_state=seed
     )
     yield from splitter.split(np.zeros(len(labels)), table["y"], table["g"])
+
+
+def _require_cv_pool(params: dict) -> str:
+    pool = params["cv_pool"]
+    if not isinstance(pool, str) or pool.strip().lower() not in {"train", "train_val"}:
+        raise BaselineDataError("cv_pool must be train or train_val")
+    return pool.strip().lower()
+
+
+def _require_cv_bool(params: dict) -> bool:
+    value = params["cv_collapse_rare"]
+    if not isinstance(value, bool):
+        raise BaselineDataError("cv_collapse_rare must be true or false")
+    return value
+
+
+def _cv_group_ids(frame: pd.DataFrame, params: dict) -> np.ndarray:
+    column = params["cv_group_column"]
+    if not isinstance(column, str) or not column.strip():
+        raise BaselineDataError("cv_group_column must name a column")
+    column = column.strip()
+    if column not in frame.columns:
+        raise BaselineDataError(f"cv_group_column {column} is not on the frame")
+    return frame[column].astype(str).to_numpy()
+
+
+def collapse_rare_stratify_labels(
+    labels: np.ndarray,
+    groups: np.ndarray,
+    n_splits: int,
+    enabled: bool,
+) -> tuple[np.ndarray, str]:
+    """Fold-assignment labels. The scored target is not changed here.
+
+    When ``enabled`` is false the labels are unchanged. A label that sits in
+    fewer groups than ``n_splits`` is mapped onto the most common label that
+    already has enough groups, and only for the fold splitter.
+    """
+    text = np.asarray(labels).astype(str)
+    group_ids = np.asarray(groups).astype(str)
+    if not enabled:
+        return text, ""
+    table = pd.DataFrame({"y": text, "g": group_ids})
+    counts = table.groupby("y")["g"].nunique()
+    rare = [label for label, count in counts.items() if int(count) < n_splits]
+    if not rare:
+        return text, ""
+    eligible = [label for label, count in counts.items() if int(count) >= n_splits]
+    if not eligible:
+        raise BaselineDataError(f"every stratify label is in fewer than {n_splits} groups")
+    host = str(table.loc[table["y"].isin(eligible), "y"].value_counts().index[0])
+    collapsed = text.copy()
+    for label in rare:
+        collapsed[collapsed == str(label)] = host
+    note = "stratify_collapsed:" + ",".join(
+        f"{label}->{host}" for label in sorted(str(label) for label in rare)
+    )
+    return collapsed, note
+
+
+def cv_pool_frame(
+    train: pd.DataFrame,
+    val: pd.DataFrame,
+    test: pd.DataFrame,
+    params: dict,
+) -> pd.DataFrame:
+    """Rows for the grouped CV. ``train_val`` never includes the test split."""
+    pool = _require_cv_pool(params)
+    if pool == "train":
+        source = train.copy()
+        if source.empty:
+            raise BaselineDataError("CV pool train is empty")
+        if set(source["split"].astype(str)) - {"train"}:
+            raise LeakageError("train CV pool includes a non-train row")
+        return source.reset_index(drop=True)
+    source = pd.concat([train, val], ignore_index=True)
+    if source.empty:
+        raise BaselineDataError("CV pool train_val is empty")
+    if set(source["split"].astype(str)) - {"train", "val"}:
+        raise LeakageError("train_val CV pool includes a row outside train and val")
+    if set(test["storm_id"].astype(str)) & set(source["storm_id"].astype(str)):
+        raise LeakageError("train_val CV includes a test storm")
+    column = str(params["cv_group_column"]).strip()
+    if column in source.columns and column in test.columns:
+        assert_no_group_leakage(source, test, group_col=column)
+    return source
 
 
 def impute_train_val(X_train: np.ndarray, X_val: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -557,7 +653,9 @@ def _cross_val(
     fitted_storms: set[str],
 ) -> tuple[float, float, str]:
     matrix = model_matrix(train, selected)
-    groups = train["storm_id"].astype(str).to_numpy()
+    groups = _cv_group_ids(train, params)
+    storms = train["storm_id"].astype(str).to_numpy()
+    n_splits = int(params["n_splits"])
     if task == "regression":
         target = train["wind_speed_kt"].to_numpy(dtype=np.float64)
         stratify = (
@@ -570,14 +668,19 @@ def _cross_val(
     else:
         target = train["imd5_class"].astype(str).to_numpy()
         stratify = target
+    stratify, collapse_note = collapse_rare_stratify_labels(
+        stratify, groups, n_splits, _require_cv_bool(params)
+    )
     folds = list(
         iter_stratified_group_folds(
-            stratify, groups, n_splits=int(params["n_splits"]), seed=int(params["seed"])
+            stratify, groups, n_splits=n_splits, seed=int(params["seed"])
         )
     )
     scores: list[float] = []
     notes: list[str] = []
     for fold_index, (train_index, val_index) in enumerate(folds):
+        if set(groups[train_index]) & set(groups[val_index]):
+            raise LeakageError("a CV group is on both sides of a fold")
         predicted, _pipeline, note = fit_numeric_pipeline(
             matrix[train_index],
             target[train_index],
@@ -586,7 +689,7 @@ def _cross_val(
             model_name=model_name,
             params=params,
             seed=int(params["seed"]) + fold_index + 1,
-            train_storms=groups[train_index],
+            train_storms=storms[train_index],
             fitted_storms=fitted_storms,
         )
         notes.append(note)
@@ -596,7 +699,12 @@ def _cross_val(
             scores.append(
                 classification_metrics(target[val_index], predicted, DEFAULT_NAMES)["macro_f1"]
             )
-    return float(np.mean(scores)), float(np.std(scores)), "inner_cv:" + "|".join(notes)
+    pool = _require_cv_pool(params)
+    column = str(params["cv_group_column"]).strip()
+    prefix = f"cv_pool:{pool};cv_group:{column}"
+    if collapse_note:
+        prefix = f"{prefix};{collapse_note}"
+    return float(np.mean(scores)), float(np.std(scores)), prefix + ";inner_cv:" + "|".join(notes)
 
 
 def _persistence_metric(frame: pd.DataFrame, task: str) -> float | None:
@@ -618,7 +726,7 @@ def _persistence_metric(frame: pd.DataFrame, task: str) -> float | None:
 
 
 def _persistence_cv(frame: pd.DataFrame, task: str, params: dict) -> tuple[float, float, str]:
-    groups = frame["storm_id"].astype(str).to_numpy()
+    groups = _cv_group_ids(frame, params)
     stratify = (
         frame["imd5_class"]
         .astype(object)
@@ -626,22 +734,33 @@ def _persistence_cv(frame: pd.DataFrame, task: str, params: dict) -> tuple[float
         .astype(str)
         .to_numpy()
     )
+    n_splits = int(params["n_splits"])
+    stratify, collapse_note = collapse_rare_stratify_labels(
+        stratify, groups, n_splits, _require_cv_bool(params)
+    )
     folds = list(
         iter_stratified_group_folds(
-            stratify, groups, n_splits=int(params["n_splits"]), seed=int(params["seed"])
+            stratify, groups, n_splits=n_splits, seed=int(params["seed"])
         )
     )
     scores: list[float] = []
-    for _train_index, val_index in folds:
+    for train_index, val_index in folds:
+        if set(groups[train_index]) & set(groups[val_index]):
+            raise LeakageError("a CV group is on both sides of a fold")
         score = _persistence_metric(frame.iloc[val_index], task)
         if score is not None:
             scores.append(score)
+    pool = _require_cv_pool(params)
+    column = str(params["cv_group_column"]).strip()
+    prefix = f"cv_pool:{pool};cv_group:{column}"
+    if collapse_note:
+        prefix = f"{prefix};{collapse_note}"
     if not scores:
-        return float("nan"), float("nan"), "inner_cv:no_previous_frame"
+        return float("nan"), float("nan"), f"{prefix};inner_cv:no_previous_frame"
     return (
         float(np.mean(scores)),
         float(np.std(scores)),
-        "inner_cv:previous_same_storm_wind",
+        f"{prefix};inner_cv:previous_same_storm_wind",
     )
 
 
@@ -723,6 +842,13 @@ def write_comparison_files(
             "Classes with fewer than 3 storms are marked indicative (n_storms<3).",
             "",
         ]
+        if str(metadata.get("wind_averaging")) == "3-min" and str(metadata.get("wind_averaging_s")) == "180":
+            record.extend(
+                [
+                    "All metrics use raw 3-minute IMD labels. wind_averaging is 3-min and wind_averaging_s is 180 on every row. There is no 1-minute conversion.",
+                    "",
+                ]
+            )
         for key, value in metadata.items():
             record.append(f"- {key}: `{value}`")
         record.append("")
@@ -834,9 +960,13 @@ def _score_persistence(
     n_features: int,
     destination: Path,
     class_rows: list[dict] | None = None,
+    cv_frame: pd.DataFrame | None = None,
 ) -> dict:
-    """Score the previous same-storm wind. Nothing is fit and val storms stay out."""
-    cv_mean, cv_std, cv_note = _persistence_cv(train, task, params)
+    """Score the previous same-storm wind. Nothing is fit and val storms stay out.
+
+    The headline score uses ``val`` only. ``cv_frame`` is the grouped-CV pool.
+    """
+    cv_mean, cv_std, cv_note = _persistence_cv(train if cv_frame is None else cv_frame, task, params)
     note = (
         "reference_baseline;previous_best_track_label;not_imagery;"
         f"previous_same_storm_wind;not_a_feature;no_pipeline;{cv_note}"
@@ -974,6 +1104,10 @@ def run_baselines(
     destination.mkdir(parents=True, exist_ok=True)
     synthetic = _synthetic_flag(frame)
     fitted: set[str] = set()
+    cv_fitted: set[str] = set()
+    pool = _require_cv_pool(params)
+    cv_bucket = fitted if pool == "train" else cv_fitted
+    cv_reg = cv_pool_frame(train, val, test, params)
     rows: list[dict] = []
     class_rows: list[dict] = []
 
@@ -990,6 +1124,7 @@ def run_baselines(
                     len(selected),
                     destination,
                     class_rows,
+                    cv_frame=cv_reg,
                 )
             )
             write_comparison_files(destination, rows, metadata)
@@ -1000,7 +1135,7 @@ def run_baselines(
             write_comparison_files(destination, rows, metadata)
             continue
         cv_mean, cv_std, cv_note = _cross_val(
-            train, selected, task="regression", model_name=model_name, params=params, fitted_storms=fitted
+            cv_reg, selected, task="regression", model_name=model_name, params=params, fitted_storms=cv_bucket
         )
         predicted, _pipeline, note = fit_numeric_pipeline(
             model_matrix(train, selected),
@@ -1058,12 +1193,20 @@ def run_baselines(
     val_cls = val[val["imd5_class"].notna()].copy()
     if train_cls.empty or val_cls.empty:
         raise BaselineDataError("classification needs labeled rows in train and val")
+    cv_cls = cv_pool_frame(train_cls, val_cls, test, params)
     for model_name in list(params["classification_models"]):
         logger.info("Classification baseline %s", model_name)
         if model_name == "persistence":
             rows.append(
                 _score_persistence(
-                    train, val, "classification", params, synthetic, len(selected), destination
+                    train,
+                    val,
+                    "classification",
+                    params,
+                    synthetic,
+                    len(selected),
+                    destination,
+                    cv_frame=cv_cls,
                 )
             )
             write_comparison_files(destination, rows, metadata)
@@ -1075,12 +1218,12 @@ def run_baselines(
             write_comparison_files(destination, rows, metadata)
             continue
         cv_mean, cv_std, cv_note = _cross_val(
-            train_cls,
+            cv_cls,
             selected,
             task="classification",
             model_name=model_name,
             params=params,
-            fitted_storms=fitted,
+            fitted_storms=cv_bucket,
         )
         predicted, _pipeline, note = fit_numeric_pipeline(
             model_matrix(train_cls, selected),
@@ -1155,6 +1298,10 @@ def run_baselines(
         raise LeakageError(f"fit saw held-out storms: {sorted(leaked)}")
     if not report.fitted_storms <= report.train_storms:
         raise LeakageError("fit saw storms that are not in the training split")
+    if pool == "train_val":
+        cv_test = frozenset(cv_fitted) & report.test_storms
+        if cv_test:
+            raise LeakageError(f"grouped CV saw test storms: {sorted(cv_test)}")
     return report
 
 
@@ -1166,6 +1313,11 @@ def frame_for_storm_split(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
     """
     split_cfg = config["split"]
     strategy = str(split_cfg["strategy"]).lower().strip()
+    if "year_holdout" in strategy:
+        raise BaselineDataError(
+            "year_holdout is not a baseline split and is not run; "
+            f"refusing split.strategy={strategy}"
+        )
     if strategy != "storm_wise":
         raise BaselineDataError(
             "baselines use storm-wise splits only via src.splits.assign_storms; "
@@ -1187,6 +1339,52 @@ def frame_for_storm_split(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
     if "source_split" in frame.columns and "source_split" not in assigned.columns:
         raise BaselineDataError("source_split was dropped while assigning storms")
     return assigned
+
+
+def frame_for_recorded_split(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep the manifest ``split`` column. Do not redraw storms.
+
+    A ``cv_group`` column must not cross modeling splits. ``source_split``
+    stays a reference.
+    """
+    if "split" not in frame.columns:
+        raise BaselineDataError("recorded split needs a split column on the manifest")
+    work = frame.copy()
+    unknown = set(work["split"].astype(str).unique()) - {"train", "val", "test"}
+    if unknown:
+        raise BaselineDataError(f"recorded split has unknown values: {sorted(unknown)}")
+    parts = [work.loc[work["split"].astype(str) == name] for name in ("train", "val", "test")]
+    for name, part in zip(("train", "val", "test"), parts, strict=True):
+        if part.empty:
+            raise BaselineDataError(f"recorded split has no {name} rows")
+    assert_no_group_leakage(*parts)
+    if "cv_group" in work.columns:
+        assert_no_group_leakage(*parts, group_col="cv_group")
+    return work
+
+
+def _git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _assignment_digest(frame: pd.DataFrame, group_column: str) -> str:
+    groups = (
+        frame[group_column].astype(str)
+        if group_column in frame.columns
+        else pd.Series([""] * len(frame), index=frame.index)
+    )
+    lines = [
+        f"{sample}|{split}|{group}"
+        for sample, split, group in zip(
+            frame["sample_id"].astype(str), frame["split"].astype(str), groups, strict=True
+        )
+    ]
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
 
 def _count_block(frame: pd.DataFrame, column: str) -> str:
@@ -1215,16 +1413,22 @@ def _run_metadata(
             for side in sorted(assigned["source_split"].astype(str).unique())
         ]
         both = len(set.intersection(*sides)) if len(sides) > 1 else 0
+    strategy = str(config["split"]["strategy"]).strip().lower()
+    recorded = strategy == "recorded"
     metadata = {
         "command": command or "",
         "manifest_command": manifest_command or "",
         "manifest": str(manifest),
-        "split_strategy": "storm_wise",
-        "split_seed": str(int(config["split"]["seed"])),
+        "git_commit": _git_commit(),
+        "split_strategy": strategy,
+        "split_seed": "not_used" if recorded else str(int(config["split"]["seed"])),
         "baseline_seed": str(int(config["baselines"]["seed"])),
         "feature_selection_seed": str(int(config["features"]["selection"]["seed"])),
-        "test_fraction": str(float(config["split"]["test_fraction"])),
-        "val_fraction": str(float(config["split"]["val_fraction"])),
+        "test_fraction": "not_used" if recorded else str(float(config["split"]["test_fraction"])),
+        "val_fraction": "not_used" if recorded else str(float(config["split"]["val_fraction"])),
+        "cv_pool": str(config["baselines"]["cv_pool"]),
+        "cv_group_column": str(config["baselines"]["cv_group_column"]),
+        "cv_collapse_rare": str(bool(config["baselines"]["cv_collapse_rare"])),
         "workers": str(int(workers)),
         "rows": str(int(len(assigned))),
         "storms": str(int(assigned["storm_id"].nunique())),
@@ -1243,10 +1447,51 @@ def _run_metadata(
     if "source_split" in assigned.columns:
         metadata["source_split"] = _count_block(assigned, "source_split")
         metadata["storms_on_both_source_sides"] = str(both)
+    if "wind_averaging" in assigned.columns:
+        metadata["wind_averaging"] = ",".join(
+            sorted({str(value) for value in assigned["wind_averaging"].tolist()})
+        )
+    if "wind_averaging_s" in assigned.columns:
+        metadata["wind_averaging_s"] = ",".join(
+            sorted({str(int(value)) for value in pd.to_numeric(assigned["wind_averaging_s"]).tolist()})
+        )
+    summary_path = manifest.with_suffix(manifest.suffix + ".summary.json")
+    if summary_path.is_file():
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        for key in (
+            "label_scope",
+            "comparability",
+            "metrics_use",
+            "on_fix_definition",
+            "augmented_dropped",
+            "default_excluded_originals",
+            "flagged_not_default_originals",
+            "drop_flagged",
+            "on_fix_rows",
+            "originals_before_exclusions",
+            "rows_written",
+            "pixel_units",
+            "year_holdout_2019",
+            "zenodo_doi",
+            "zip_md5",
+        ):
+            if key in summary:
+                metadata[key] = summary[key] if isinstance(summary[key], str) else json.dumps(summary[key])
     return metadata
 
 
-def _cache_key(manifest: Path, config: dict) -> dict[str, object]:
+def _cache_key(manifest: Path, config: dict, frame: pd.DataFrame | None = None) -> dict[str, object]:
+    strategy = str(config["split"]["strategy"]).strip().lower()
+    if strategy == "recorded":
+        if frame is None:
+            raise BaselineDataError("recorded split cache key needs the assigned frame")
+        return {
+            "manifest": str(manifest.resolve()),
+            "strategy": "recorded",
+            "assignments": _assignment_digest(frame, str(config["baselines"]["cv_group_column"])),
+            "feature_seed": int(config["features"]["selection"]["seed"]),
+            "calibrated": bool(config["features"]["calibrated"]),
+        }
     return {
         "manifest": str(manifest.resolve()),
         "strategy": "storm_wise",
@@ -1323,10 +1568,16 @@ def run_from_config(
 ) -> BaselineReport:
     """Run the Phase 2 comparison. Does not download imagery.
 
-    The modeling split is always storm-wise. A ``source_split`` column is
-    reference only.
+    ``storm_wise`` redraws storms. ``recorded`` keeps the manifest split.
+    A ``source_split`` column is reference only. ``year_holdout`` is refused.
     """
     config = load_config(config_path)
+    strategy = str(config["split"]["strategy"]).strip().lower()
+    if "year_holdout" in strategy:
+        raise BaselineDataError(
+            "year_holdout is not a baseline split and is not run; "
+            f"refusing split.strategy={strategy}"
+        )
     manifest = Path(manifest_path or config["paths"]["manifest"])
     if not manifest.is_file():
         raise FileNotFoundError(
@@ -1334,11 +1585,20 @@ def run_from_config(
             "This command does not download NASA, TCIR, or INSAT imagery."
         )
     destination = Path(out_dir) if out_dir else Path(config["paths"]["reports"]) / "baselines"
-    frame = frame_for_storm_split(load_manifest(manifest), config)
+    loaded = load_manifest(manifest)
+    if strategy == "recorded":
+        frame = frame_for_recorded_split(loaded)
+    elif strategy == "storm_wise":
+        frame = frame_for_storm_split(loaded, config)
+    else:
+        raise BaselineDataError(
+            "baselines accept storm_wise or recorded splits; "
+            f"refusing split.strategy={strategy}"
+        )
     spec = FeatureSpec.from_config(config)
     cache = Path(feature_cache) if feature_cache else None
     meta_path = cache.with_suffix(cache.suffix + ".meta.json") if cache else None
-    key = _cache_key(manifest, config)
+    key = _cache_key(manifest, config, frame)
     table = None
     dropped = 0
     if cache and cache.is_file() and meta_path and meta_path.is_file():
@@ -1348,7 +1608,10 @@ def run_from_config(
             dropped = int(saved.get("dropped_cross_split_links", 0))
             logger.info("Loaded feature cache %s", cache)
     if table is None:
-        table, dropped = extract_table(frame, manifest, spec, config, workers=workers)
+        checkpoint = cache.with_suffix(cache.suffix + ".images.csv") if cache else None
+        table, dropped = extract_table(
+            frame, manifest, spec, config, workers=workers, image_checkpoint=checkpoint
+        )
         if cache:
             cache.parent.mkdir(parents=True, exist_ok=True)
             table.to_csv(cache, index=False)
@@ -1376,13 +1639,21 @@ def run_from_config(
     return run_baselines(table, spec.feature_names(), config, destination, metadata=metadata)
 
 
-def extract_table(frame, manifest, spec: FeatureSpec, config: dict, workers: int = 1):
+def extract_table(
+    frame,
+    manifest,
+    spec: FeatureSpec,
+    config: dict,
+    workers: int = 1,
+    image_checkpoint: str | Path | None = None,
+):
     return extract_feature_table(
         frame,
         manifest,
         spec,
         max_missing_fraction=float(config["data"]["max_missing_fraction"]),
         workers=workers,
+        image_checkpoint=image_checkpoint,
     )
 
 

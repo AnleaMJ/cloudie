@@ -51,6 +51,13 @@ Do not commit imagery or best-track dumps. CI must not download them.
   The intensity page reads the public Infrared-1 JPEG on
   https://mausam.imd.gov.in/responsive/satellite.php when someone clicks
   it. That file is not committed, and tests do not download it.
+  Cropped INCYDE IR is Zenodo 8015544 (`Cropped_cyclone_data.zip`,
+  MD5 `ed5dac254c689e5a327dee7580324347`). `python -m src.incyde` builds
+  a local manifest from an already downloaded unzip and does not fetch
+  it. CI must not download it. Labels stay raw IMD 3-minute winds
+  (`wind_averaging=3-min`, `wind_averaging_s=180`) with no conversion.
+  The modeling split is `incyde/audit/storm_split.csv`. Original frames
+  only. `exclusions.csv` drops a row only when `default_exclude` is true.
 - TC PRIMED: https://doi.org/10.25921/dmy1-0595. Optional later source.
 
 `wind_averaging` must be a column on every manifest, for example `1-min`,

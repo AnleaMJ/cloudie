@@ -1,0 +1,197 @@
+project:
+  name: cyclone-intensity-estimation
+  seed: 42
+  honesty: >
+    No trained weights are shipped. Smoke images are synthetic.
+    This is not an operational forecast or warning system.
+    Best-track labels are noisy, and agreement with them is not ground truth.
+    No survey or smoke number is a result of this project.
+paths:
+  manifest: data/incyde/manifest.csv
+  artifacts: artifacts
+  reports: reports
+  checkpoint_name: checkpoint.pt
+  run_records: artifacts/run_records
+  runs: artifacts/runs
+  nasa_root: data/nasa_tc
+  tcir_files: []
+  tcir_manifest_dir: data/tcir
+  frame_cache: artifacts/frame_cache
+  # Empty until a real run is published. CLOUDIE_RUN_ID and CLOUDIE_HF_MODEL_REPO override these.
+  run_id: null
+  hf_model_repo: null
+data:
+  dataset: incyde
+  # null or native keeps each chip's height and width. NASA TorchGeo chips
+  # are 366x366 (Gurung et al. 2023). TCIR chips are 201x201. An integer
+  # resizes the deep model to that square. Classical features stay native.
+  image_size: native
+  channels: 1
+  normalize: zscore
+  max_missing_fraction: 0.30
+  plausible_wind_kt: [0, 200]
+  # Raw IMD 3-minute sustained winds from the INCYDE labels CSV.
+  # Do not convert them to 1-minute. wind_averaging_s is 180 on every row.
+  wind_averaging: 3-min
+  # Project bins for error tables. Not an IMD warning, and not the IMD
+  # 3-minute scale. IMD uses 3-minute winds. These edges are this project's
+  # own grouping: [17, 34) D_DD, [34, 48) CS, [48, 64) SCS, [64, 91) VSCS,
+  # and 91 kt and above ESCS_SUCS.
+  imd5_edges_kt: [17, 34, 48, 64, 91]
+  imd5_names: [D_DD, CS, SCS, VSCS, ESCS_SUCS]
+  # International knot. Used only to display a second unit.
+  kt_to_kmh: 1.852
+  # letterbox pads to a square before the checkpoint resize. stretch is the old path.
+  resize: letterbox
+  pad: median
+  grouping_note: >
+    Intensity category is this project's grouping on the configured knot bins.
+    It is not an official IMD class.
+split:
+  strategy: recorded
+  test_fraction: 0.2
+  val_fraction: 0.2
+  holdout_years: []
+  holdout_basin: null
+  seed: 42
+model:
+  name: simple_cnn
+  pretrained: false
+  dropout: 0.3
+  mc_samples: 20
+  # Used when model.name is convlstm. The sequence length stays 4.
+  n_frames: 4
+  hidden: 16
+train:
+  batch_size: 16
+  epochs: 20
+  lr: 0.001
+  weight_decay: 0.0001
+  patience: 5
+  # auto picks xpu, then cuda, then cpu. XPU and CUDA need CLOUDIE_ALLOW_GPU=1.
+  device: auto
+  max_steps: null
+  grad_accum_steps: 1
+  num_workers: 2
+  # Fraction of max(1, CPU output magnitude). Leaves room for bf16 versus fp32.
+  device_parity_tol: 0.05
+  class_loss_weight: 0.1
+  # Applied only when r34_nmi and rmw_nmi exist on the train split.
+  size_loss_weight: 0.1
+predict:
+  # Review flag, not a warning threshold.
+  advisory_jump_kt: 20
+  operational_disclaimer: "This is not an operational forecast."
+  no_run_record_review: "no matching real-data run record"
+  no_run_record_refusal: >
+    This checkpoint has no matching real-data run record.
+    There is no model output. This is not a forecast.
+  held_out_refusal: >
+    This checkpoint's real-data run record has not passed the held-out
+    storm check. There is no model output. This is not a forecast.
+  landfall_note: "not a landfall forecast"
+  coast_reference_note: >
+    Reference points are approximate coastal coordinates, not a shoreline
+    survey and not a landfall forecast.
+  coastal_heading: "nearest Indian coastal states to the current position"
+  coastal_count: 3
+  earth_radius_km: 6371.0
+  latitude_keys: [latitude, lat]
+  longitude_keys: [longitude, lon]
+  # Image mean must sit within this many training standard deviations.
+  training_mean_width: 3
+  # Same storm, resized, should stay inside this knot span.
+  scale_tolerance_kt: 1.0
+  sklearn_features: [symmetry, cold_concentration, wall_contrast, eye_contrast]
+  confidence:
+    uncalibrated_label: uncalibrated
+    coverage_label: "real-data coverage recorded"
+    gate_weight: 0.4
+    mc_weight: 0.4
+    interval_weight: 0.2
+    mc_std_scale_kt: 15
+    interval_scale_kt: 30
+  gate:
+    refusal: "not a tropical cyclone IR image"
+    grayscale_tolerance: 0.08
+    min_std: 0.02
+    min_symmetry: 0.45
+    min_cold_concentration: 0.36
+    cold_radius_fraction: 0.45
+    cold_tail_fraction: 0.25
+    eye_radius_fraction: 0.12
+    eyewall_outer_fraction: 0.32
+    outer_inner_fraction: 0.55
+    outer_outer_fraction: 0.95
+    min_wall_contrast: 0.45
+    radial_bins: 8
+    cold_value: auto
+    max_dropout_std_kt: 50
+    concentration_reference: 0.75
+  # Approximate public reference points, not Survey of India boundaries.
+  coast:
+    - {name: Gujarat, lat: 21.64, lon: 69.61}
+    - {name: Maharashtra, lat: 18.94, lon: 72.84}
+    - {name: Goa, lat: 15.49, lon: 73.83}
+    - {name: Karnataka, lat: 12.91, lon: 74.86}
+    - {name: Kerala, lat: 9.93, lon: 76.26}
+    - {name: Tamil Nadu, lat: 13.08, lon: 80.27}
+    - {name: Puducherry, lat: 11.94, lon: 79.83}
+    - {name: Andhra Pradesh, lat: 17.69, lon: 83.22}
+    - {name: Odisha, lat: 19.81, lon: 85.83}
+    - {name: West Bengal, lat: 21.63, lon: 87.51}
+    - {name: Andaman and Nicobar Islands, lat: 11.67, lon: 92.74}
+    - {name: Lakshadweep, lat: 10.57, lon: 72.64}
+    - {name: Dadra and Nagar Haveli and Daman and Diu, lat: 20.42, lon: 72.83}
+forbidden_features:
+  - wind_speed_kt
+  - r34_nmi
+  - rmw_nmi
+  - imd5_class
+  - intensity_bin
+features:
+  # Name distributional stats tb_* only when a calibration table was applied.
+  calibrated: false
+  cold_thresholds: [200, 210, 220, 230, 240]
+  radial_bins: 8
+  eye_radius_fraction: 0.12
+  cdo_outer_fraction: 0.35
+  eye_contrast_min: 2.0
+  dav_radii_fractions: [0.15, 0.30, 0.45, 0.60]
+  dav_annulus_width_fraction: 0.08
+  glcm_levels: 16
+  glcm_distance: 1
+  selection:
+    correlation_threshold: 0.95
+    max_features: 25
+    method: correlation_rf
+    n_estimators: 80
+    seed: 42
+baselines:
+  n_splits: 3
+  seed: 42
+  # Validation per-class intervals. Each resample draws storms with replacement.
+  # The generator seed is baselines.seed. Rows are not resampled.
+  bootstrap_resamples: 1000
+  # List each storm inside a class that has fewer than 3 storms.
+  per_storm_breakdown: true
+  regression_models: [mean, persistence, ridge, lr, knn, rf, xgboost, svr]
+  classification_models: [mean, persistence, logreg, knn, rf, xgboost, svc]
+  use_smote: true
+  ridge_alpha: 1.0
+  knn_neighbors: 5
+  svr_c: 1.0
+  svc_c: 1.0
+  rf_estimators: 200
+  rf_max_depth: 6
+  xgb_estimators: 80
+  xgb_max_depth: 3
+  xgb_learning_rate: 0.1
+  max_iter: 1000
+  # Grouped CV. train folds the training storms only. train_val folds
+  # train and val together and never includes test. The group column stays
+  # intact inside a fold. cv_collapse_rare remaps a stratify label that
+  # sits in fewer groups than n_splits, for fold assignment only.
+  cv_pool: train_val
+  cv_group_column: cv_group
+  cv_collapse_rare: true

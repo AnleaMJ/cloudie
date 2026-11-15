@@ -14,12 +14,15 @@ from sklearn.linear_model import LinearRegression
 from src.baselines import (
     BaselineDataError,
     fit_numeric_pipeline,
+    frame_for_recorded_split,
     frame_for_storm_split,
     iter_stratified_group_folds,
     persistence_class_predictions,
     persistence_predictions,
     resample_training_fold,
     run_baselines,
+    run_from_config,
+    write_comparison_files,
     xgboost_available,
 )
 from src.config import load_config
@@ -51,6 +54,9 @@ def _params(**overrides):
             "max_iter": 300,
             "bootstrap_resamples": 32,
             "per_storm_breakdown": True,
+            "cv_pool": "train",
+            "cv_group_column": "storm_id",
+            "cv_collapse_rare": False,
             "regression_models": ["mean", "ridge"],
             "classification_models": ["most_frequent", "logreg"],
         },
@@ -517,3 +523,128 @@ def test_per_storm_breakdown_can_be_turned_off(tmp_path: Path) -> None:
     assert "storm" not in set(table["row_kind"])
     marked = table[(table["model"] == "mean") & (table["intensity_class"] == "D_DD")]
     assert marked["status"].eq("indicative (n_storms<3)").all()
+
+
+def test_recorded_split_is_not_redrawn() -> None:
+    rows = []
+    for storm, split in (("a", "train"), ("b", "train"), ("c", "val"), ("d", "test")):
+        rows.append(
+            {
+                "sample_id": storm,
+                "storm_id": storm,
+                "split": split,
+                "cv_group": "g-" + storm,
+                "source_split": "train",
+                "wind_speed_kt": 40.0,
+            }
+        )
+    frame = pd.DataFrame(rows)
+    kept = frame_for_recorded_split(frame)
+    assert list(kept["split"]) == ["train", "train", "val", "test"]
+    assert list(kept["source_split"]) == ["train"] * 4
+
+
+def test_year_holdout_is_refused(tmp_path: Path) -> None:
+    config = load_config(ROOT / "config" / "config.yaml")
+    config["split"]["strategy"] = "year_holdout_2019"
+    frame = pd.DataFrame(
+        {
+            "sample_id": ["a"],
+            "image_path": ["a.npy"],
+            "storm_id": ["a"],
+            "wind_speed_kt": [30.0],
+            "wind_averaging": ["1min"],
+            "is_synthetic": [False],
+            "split": ["train"],
+        }
+    )
+    with pytest.raises(BaselineDataError, match="year_holdout"):
+        frame_for_storm_split(frame, config)
+    manifest = tmp_path / "manifest.csv"
+    frame.to_csv(manifest, index=False)
+    config_path = tmp_path / "config.yaml"
+    import yaml
+
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    with pytest.raises(BaselineDataError, match="year_holdout"):
+        run_from_config(config_path, manifest, tmp_path / "out")
+
+
+def test_run_md_states_raw_three_minute_labels(tmp_path: Path) -> None:
+    from src.baselines import _empty_metric_row
+
+    row = _empty_metric_row("regression", "mean", "note", "no", 1)
+    write_comparison_files(
+        tmp_path,
+        [row],
+        {"wind_averaging": "3-min", "wind_averaging_s": "180"},
+    )
+    text = (tmp_path / "RUN.md").read_text(encoding="utf-8")
+    assert "All metrics use raw 3-minute IMD labels." in text
+    assert "wind_averaging_s is 180" in text
+    assert "no 1-minute conversion" in text
+
+
+def test_train_val_cv_keeps_cooccurrence_groups_together(tmp_path: Path, monkeypatch) -> None:
+    rows = []
+    plan = [
+        ("a", "train", "g1", 30.0, "D_DD"),
+        ("c", "train", "g2", 32.0, "D_DD"),
+        ("d", "train", "g3", 50.0, "CS"),
+        ("h", "train", "g6", 52.0, "CS"),
+        ("b", "val", "g1", 31.0, "D_DD"),
+        ("e", "val", "g4", 51.0, "CS"),
+        ("f", "test", "g5", 80.0, "VSCS"),
+    ]
+    for storm, split, group, wind, klass in plan:
+        for time_index in range(3):
+            rows.append(
+                {
+                    "sample_id": f"{storm}_{time_index}",
+                    "storm_id": storm,
+                    "split": split,
+                    "cv_group": group,
+                    "wind_speed_kt": wind + time_index,
+                    "imd5_class": klass,
+                    "is_synthetic": True,
+                    "f1": wind + time_index,
+                    "f2": 1.0,
+                }
+            )
+    seen_groups: list[np.ndarray] = []
+    real = iter_stratified_group_folds
+
+    def spy(labels, groups, n_splits, seed):
+        folds = list(real(labels, groups, n_splits=n_splits, seed=seed))
+        seen_groups.append(np.asarray(groups))
+        for train_index, val_index in folds:
+            assert set(groups[train_index]).isdisjoint(set(groups[val_index]))
+        return folds
+
+    monkeypatch.setattr("src.baselines.iter_stratified_group_folds", spy)
+    fitted_calls: list[set[str]] = []
+    real_fit = fit_numeric_pipeline
+
+    def spy_fit(*args, **kwargs):
+        fitted_calls.append({str(item) for item in kwargs["train_storms"]})
+        return real_fit(*args, **kwargs)
+
+    monkeypatch.setattr("src.baselines.fit_numeric_pipeline", spy_fit)
+    config = _params(
+        cv_pool="train_val",
+        cv_group_column="cv_group",
+        cv_collapse_rare=True,
+        n_splits=2,
+        regression_models=["mean"],
+        classification_models=["most_frequent"],
+        bootstrap_resamples=8,
+        per_storm_breakdown=False,
+    )
+    report = run_baselines(pd.DataFrame(rows), ["f1", "f2"], config, tmp_path)
+    assert seen_groups
+    assert report.fitted_storms <= report.train_storms
+    assert report.fitted_storms.isdisjoint(report.val_storms | report.test_storms)
+    assert all("f" not in call for call in fitted_calls)
+    assert report.comparison["fit_notes"].astype(str).str.contains("cv_pool:train_val").all()
+    assert report.comparison["fit_notes"].astype(str).str.contains("cv_group:cv_group").all()
+    assert set(pd.read_csv(tmp_path / "per_class_metrics.csv")["split"]) == {"val"}
