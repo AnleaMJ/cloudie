@@ -1,0 +1,7 @@
+Sequence,storm_id,name,basin,peak_imd_class,proposed_split,cooccurrence_group
+1,INCYDE-S01_IMD-2018-001,ONE,BOB,CS,train,1
+2,INCYDE-S02_IMD-2019-002,TWO,ARB,SCS,val,2
+3,INCYDE-S03_IMD-2021-003,THREE,BOB,DD,test,3
+4,INCYDE-S04_IMD-2018-004,FOUR,BOB,VSCS,train,1
+5,INCYDE-S05_IMD-2017-042,FIVE,BOB,ESCS,train,5
+6,INCYDE-S06_IMD-2018-006,SIX,BOB,SCS,train,6

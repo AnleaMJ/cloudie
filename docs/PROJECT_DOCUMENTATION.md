@@ -43,8 +43,9 @@ ImageNet download. Southern Hemisphere frames are not flipped.
 `src/evaluate.py` scores supplied wind predictions on the test storms from a
 storm split. MAE, RMSE, and bias are reported overall and inside our own
 grouping, IMD-style names, including VSCS and ESCS/SuCS. The report records
-`wind_averaging` and does not convert 1-minute NASA HURDAT2 winds into the
-3-minute winds used by IMD class definitions. Mean, ridge, and persistence
+`wind_averaging`. It does not itself convert 1-minute NASA HURDAT2 winds.
+`src.train` does that conversion into `wind_kt_3min` before it scores.
+Mean, ridge, and persistence
 reuse `src/baselines.py`. Persistence is a reference baseline. It uses the
 previous frame's best-track label, not the imagery, so image-only models
 cannot be compared against it. Residual-quantile widths are fit on validation storms

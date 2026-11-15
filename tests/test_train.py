@@ -424,3 +424,124 @@ def test_tcir_path_trains_on_a_local_fixture(tmp_path: Path) -> None:
     assert groups["val"].isdisjoint(groups["test"])
     for split_name in ("val", "test"):
         assert metrics[split_name]["n"] > 0
+    assert metrics["label_column"] == "wind_kt_3min"
+    assert metrics["wind_conversion"].startswith("0.93, derived from WMO/TD-1555")
+    assert "val_raw" in metrics
+    assert metrics["val_raw"]["n"] == metrics["val"]["n"]
+
+
+def test_incyde_trains_on_fixtures_and_init_from_skips_the_mismatch(tmp_path: Path) -> None:
+    """CPU smoke of the INCYDE loader and a converted-parent fine-tune. No download."""
+    pytest.importorskip("torch")
+    pytest.importorskip("matplotlib")
+    import numpy as np
+    import pandas as pd
+    import torch
+
+    from src.labels import WIND_CONVERSION_NOTE
+    from src.train import build_net, run_training
+    from tests.test_incyde import FIXTURE, write_images
+
+    root = tmp_path / "incyde"
+    pixels = {
+        "01JAN2018_0030_1.jpg": 10,
+        "01JAN2018_0600_2.jpg": 10,
+        "31DEC2018_2330_4.jpg": 10,
+        "01JAN2019_0230_4.jpg": 10,
+        "02FEB2018_1100_5.jpg": 10,
+        "01JAN2018_0030_1_rot_180.jpg": 250,
+        "15JUN2019_1200_9.jpg": 200,
+        "15JUN2019_1200_9_rot_180.jpg": 250,
+        "20MAY2021_0900_3.jpg": 180,
+    }
+    write_images(root, pixels)
+    config = load_config(ROOT / "config" / "config_smoke.yaml")
+    config["data"]["image_size"] = 16
+    config["data"]["dataset"] = "incyde"
+    config["train"]["epochs"] = 1
+    config["train"]["batch_size"] = 4
+    config["train"]["num_workers"] = 0
+    config["train"]["patience"] = 2
+    config["paths"]["incyde_root"] = str(root)
+    config["paths"]["runs"] = str(tmp_path / "runs")
+    config["incyde"]["manifest_csv"] = str(FIXTURE / "labels.csv")
+    config["incyde"]["storm_split_csv"] = str(FIXTURE / "storm_split.csv")
+    config["incyde"]["exclusions_csv"] = str(FIXTURE / "exclusions.csv")
+    config["incyde"]["archive"] = None
+    config["split"]["strategy"] = "storm_wise"
+    run_dir = run_training(
+        config, dataset="incyde", model="simplecnn", max_steps=2, device="cpu"
+    )
+    metrics = _assert_run_record(run_dir, config["paths"]["checkpoint_name"])
+    assert metrics["dataset"] == "incyde"
+    assert metrics["quote_as_result"] == "no"
+    assert metrics["label_column"] == "wind_kt_3min"
+    assert metrics["wind_conversion"] is None
+    assert metrics["wind_averaging"] == "3min"
+    assert metrics["wind_averaging_s"] == 180
+    assert metrics["wind_averaging_mismatch"] is False
+    assert metrics["test"]["scored"] is False
+    assert "allow-final-test" in metrics["test"]["reason"]
+    assert metrics["test_raw"]["scored"] is False
+    for key in ("mae_kt", "rmse_kt", "bias_kt", "n"):
+        assert key in metrics["val"]
+        assert key in metrics["val_raw"]
+    assert metrics["val"]["n"] == metrics["val_raw"]["n"]
+    assert metrics["norm_by_dataset"]["incyde"]["source_split"] == "train"
+    assert metrics["norm_by_dataset"]["incyde"]["pixel_kind"] == "jpeg_uncalibrated"
+    assert metrics["norm_by_dataset"]["incyde"]["mean"] == pytest.approx(10.0)
+    manifest = pd.read_csv(run_dir / "split_manifest.csv")
+    assert set(manifest["wind_averaging"]) == {"3min"}
+    assert np.allclose(manifest["wind_kt_3min"], manifest["wind_kt"])
+    eval_rows = manifest.loc[manifest["split"] != "train"]
+    assert not eval_rows["is_synthetic"].astype(bool).any()
+    assert manifest.groupby("storm_id")["split"].nunique().max() == 1
+
+    parent = tmp_path / "parent.pt"
+    parent_config = load_config(ROOT / "config" / "config_smoke.yaml")
+    parent_config["data"]["image_size"] = 16
+    parent_config["model"]["name"] = "simple_cnn"
+    model = build_net(parent_config, size_head=False)
+    with torch.no_grad():
+        for tensor in model.parameters():
+            tensor.fill_(0.125)
+    torch.save(
+        {
+            "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+            "model_name": "simple_cnn",
+            "run_id": "parent-tcir",
+            "dataset": "tcir",
+            "label_column": "wind_kt_3min",
+            "wind_conversion": WIND_CONVERSION_NOTE,
+            "wind_averaging": "1min",
+            "wind_averaging_s": 60,
+            "wind_averaging_by_split": {
+                name: {"wind_averaging": ["1min"], "wind_averaging_s": [60]}
+                for name in ("train", "val", "test")
+            },
+        },
+        parent,
+    )
+    config["train"]["lr"] = 0.0
+    config["train"]["weight_decay"] = 0.0
+    config["paths"]["runs"] = str(tmp_path / "finetune")
+    tuned = run_training(
+        config,
+        dataset="incyde",
+        model="simplecnn",
+        max_steps=1,
+        device="cpu",
+        init_from=parent,
+        allow_final_test=True,
+    )
+    tuned_metrics = _assert_run_record(tuned, config["paths"]["checkpoint_name"])
+    assert tuned_metrics["wind_averaging_mismatch"] is False
+    assert tuned_metrics["parent_run_id"] == "parent-tcir"
+    assert tuned_metrics["label_column"] == "wind_kt_3min"
+    assert tuned_metrics["test"]["n"] > 0
+    assert tuned_metrics["test_raw"]["n"] > 0
+    assert tuned_metrics["norm_by_dataset"]["incyde"]["mean"] == pytest.approx(10.0)
+    payload = torch.load(tuned / config["paths"]["checkpoint_name"], map_location="cpu", weights_only=False)
+    parent_payload = torch.load(parent, map_location="cpu", weights_only=False)
+    for key, tensor in parent_payload["state_dict"].items():
+        assert torch.allclose(payload["state_dict"][key], tensor)

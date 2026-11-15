@@ -42,7 +42,15 @@ from src.device import (
     seeded_parity_batch,
     xpu_device_properties,
 )
-from src.preprocessing import NormStats, fit_norm_stats, norm_by_dataset, prepare_image, stack_prepared
+from src.labels import apply_wind_standard, back_converted_prediction, run_conversion_note
+from src.preprocessing import (
+    NormStats,
+    fit_norm_stats,
+    norm_by_dataset,
+    prepare_image,
+    prepare_training_chip,
+    stack_prepared,
+)
 from src.schema import (
     SchemaError,
     parse_is_synthetic,
@@ -119,17 +127,21 @@ def class_sample_weights(
     return sample, class_weight
 
 
-def project_labels(frame: pd.DataFrame, config: dict) -> list[str | None]:
+def project_labels(
+    frame: pd.DataFrame, config: dict, wind_column: str = "wind_speed_kt"
+) -> list[str | None]:
     """Project class names, only when one wind-averaging period is recorded.
 
     These names are the project's grouping, not official IMD classes.
     A missing or mixed period raises instead of leaving the names blank.
+    ``wind_column`` is the training target. INCYDE's own IMD class is the
+    ``imd_class`` column, computed on the 3-minute label.
     """
     recorded_wind_averaging(frame)
     edges = tuple(float(edge) for edge in config["data"]["imd5_edges_kt"])
     names = tuple(str(name) for name in config["data"]["imd5_names"])
     return [
-        wind_to_imd5(float(wind), edges, names) for wind in frame["wind_speed_kt"]
+        wind_to_imd5(float(wind), edges, names) for wind in frame[wind_column]
     ]
 
 
@@ -349,7 +361,11 @@ class PathFrames:
         stats = None
         if self.mean is not None and self.std is not None:
             stats = NormStats(mean=self.mean, std=self.std, source_split="train")
-        image = prepare_image(load_image(row["path"]), self.image_size, stats, self.max_missing)
+        image = load_image(row["path"])
+        angle = row.get("angle")
+        if angle is not None and pd.isna(angle):
+            angle = None
+        image = prepare_training_chip(image, self.image_size, angle, stats, self.max_missing)
         label = row["label"]
         class_index = self._index.get(label, -1) if label is not None else -1
         return (
@@ -747,7 +763,7 @@ LOGGER = logging.getLogger("src.train")
 
 # CLI names. simplecnn is the YAML name simple_cnn. ConvLSTM stays on train().
 _CLI_MODELS = {"simplecnn": "simple_cnn", "simple_cnn": "simple_cnn", "resnet18": "resnet18"}
-_DATASETS = ("nasa", "tcir", "smoke")
+_DATASETS = ("nasa", "tcir", "incyde", "smoke")
 RUN_FILES = (
     "checkpoint",
     "resolved_config.yaml",
@@ -766,8 +782,14 @@ def canonical_model_name(name: str) -> str:
     return _CLI_MODELS[key]
 
 
-def refuse_mixed_resolution(frame: pd.DataFrame, dataset: str) -> None:
-    """One dataset, one source resolution. NASA and TCIR stay in separate runs."""
+def refuse_mixed_resolution(
+    frame: pd.DataFrame, dataset: str, image_size: int | None = None
+) -> None:
+    """One dataset, one source resolution. NASA and TCIR stay in separate runs.
+
+    INCYDE crops are not one native size. A configured square resize is the
+    training grid. ``native`` still refuses a mix.
+    """
     if frame.empty:
         raise ValueError(f"{dataset} frame has no rows")
     sizes: set[int] = set()
@@ -778,6 +800,23 @@ def refuse_mixed_resolution(frame: pd.DataFrame, dataset: str) -> None:
             int(height) if int(height) == int(width) else -1
             for height, width in zip(frame["native_height"], frame["native_width"], strict=True)
         }
+    if dataset == "incyde":
+        if {"native_height", "native_width"} <= set(frame.columns):
+            shapes = {
+                (int(height), int(width))
+                for height, width in zip(
+                    frame["native_height"], frame["native_width"], strict=True
+                )
+            }
+        else:
+            shapes = {(int(value), int(value)) for value in sizes}
+        if len(shapes) > 1 and image_size is None:
+            raise ValueError(
+                "INCYDE frames mix native sizes "
+                f"{sorted(shapes)} and data.image_size is native. "
+                "Set a square image_size so corner bars are not a second grid."
+            )
+        return
     if len(sizes) > 1:
         raise ValueError(
             f"refusing a {dataset} batch that mixes resolutions {sorted(sizes)}. "
@@ -882,6 +921,23 @@ def load_tcir_frame(config: dict) -> tuple[pd.DataFrame, int]:
     return _absolute_image_paths(frame, manifest_dir), int(len(excluded))
 
 
+def load_incyde_frame(config: dict) -> tuple[pd.DataFrame, int]:
+    """INCYDE manifest from a local extract. The audit CSVs name the split.
+
+    ``rot_180`` copies stay on the source storm and in train only. Nothing
+    is downloaded. ``on_fix`` is omitted because the audit files do not
+    record it.
+    """
+    from src.incyde import load_frame
+
+    frame, excluded = load_frame(config)
+    if "source_split" in frame.columns:
+        raise LeakageError("INCYDE must not carry an official source_split")
+    refuse_mixed_resolution(frame, "incyde", parse_image_size(config["data"]["image_size"]))
+    _log_excluded("incyde", int(excluded), "default_exclude, dropped augs, eval synthetics")
+    return frame, int(excluded)
+
+
 def load_smoke_frame(config: dict) -> tuple[pd.DataFrame, int]:
     """Synthetic manifest named by ``paths.manifest``. Not a result."""
     path = Path(config["paths"]["manifest"])
@@ -899,16 +955,43 @@ def load_smoke_frame(config: dict) -> tuple[pd.DataFrame, int]:
     return _absolute_image_paths(frame, path.parent), 0
 
 
+def training_wind_column(config: dict) -> str:
+    """Column the loss reads. The default in the YAML is ``wind_kt_3min``."""
+    column = str(config["labels"]["label_column"]).strip()
+    if column not in {"wind_kt_3min", "wind_speed_kt", "wind_kt"}:
+        raise ValueError("labels.label_column must be wind_kt_3min, wind_speed_kt, or wind_kt")
+    return column
+
+
+def apply_label_standard(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Attach ``wind_kt_3min`` using the YAML factor. Raw knots stay put."""
+    block = config["labels"]
+    return apply_wind_standard(
+        frame,
+        factor=float(block["wind_1min_to_3min"]),
+        policy=str(block["near_land_policy"]),
+        open_water_km=float(block["open_water_km"]),
+    )
+
+
 def load_training_frame(dataset: str, config: dict) -> tuple[pd.DataFrame, int]:
-    """Load one dataset. NASA and TCIR are never concatenated."""
+    """Load one dataset. NASA and TCIR are never concatenated.
+
+    Every dataset then gets ``wind_kt_3min``. INCYDE passes through.
+    NASA and TCIR 1-minute labels are multiplied by the configured factor.
+    """
     name = str(dataset).strip().lower()
     if name not in _DATASETS:
         raise ValueError(f"dataset must be one of {', '.join(_DATASETS)}")
     if name == "nasa":
-        return load_nasa_frame(config)
-    if name == "tcir":
-        return load_tcir_frame(config)
-    return load_smoke_frame(config)
+        frame, excluded = load_nasa_frame(config)
+    elif name == "tcir":
+        frame, excluded = load_tcir_frame(config)
+    elif name == "incyde":
+        frame, excluded = load_incyde_frame(config)
+    else:
+        frame, excluded = load_smoke_frame(config)
+    return apply_label_standard(frame, config), excluded
 
 
 def assign_project_split(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
@@ -1223,7 +1306,7 @@ def _parent_periods(payload: dict) -> set[str]:
     return {value for value in periods if value and value.lower() != "none"}
 
 
-def load_init_weights(model, path: str | Path, config: dict) -> tuple[object, str, set[str]]:
+def load_init_weights(model, path: str | Path, config: dict) -> tuple[object, str, set[str], object]:
     """Load weights only. Optimizer state is left untouched.
 
     A different ``model_name`` or a state dict whose keys or shapes differ
@@ -1258,34 +1341,104 @@ def load_init_weights(model, path: str | Path, config: dict) -> tuple[object, st
             )
     model.load_state_dict({key: value.detach().cpu() for key, value in incoming.items()})
     run_id = payload.get("run_id")
-    return run_id, _file_sha256(checkpoint), _parent_periods(payload)
+    return run_id, _file_sha256(checkpoint), _parent_periods(payload), payload.get("label_column")
 
 
-def _warn_wind_mismatch(parent: set[str], current: set[str]) -> bool:
-    """Loud warning when a fine-tune crosses averaging periods. No conversion."""
+def averaging_mismatch(
+    parent_periods: set[str],
+    current_periods: set[str],
+    parent_label: object,
+    current_label: object,
+) -> bool:
+    """True when raw averaging periods differ and the 3-minute target is not both sides.
+
+    A parent and a child that both train on ``wind_kt_3min`` already share
+    the converted target, so a 1-minute pretrain and a 3-minute fine-tune
+    do not set the mismatch flag. Forcing raw labels (``wind_speed_kt`` or
+    ``wind_kt``) on either side keeps the flag.
+    """
+    if str(parent_label) == "wind_kt_3min" and str(current_label) == "wind_kt_3min":
+        return False
+    parent = {str(value) for value in parent_periods if str(value).strip()}
+    current = {str(value) for value in current_periods if str(value).strip()}
     if not parent or not current or parent == current:
+        return False
+    return True
+
+
+def _warn_wind_mismatch(
+    parent: set[str],
+    current: set[str],
+    parent_label: object,
+    current_label: object,
+) -> bool:
+    """Loud warning when raw labels cross averaging periods."""
+    if not averaging_mismatch(parent, current, parent_label, current_label):
         return False
     message = (
         "WARNING: wind_averaging mismatch. "
         f"Parent checkpoint records {sorted(parent)} and this dataset records {sorted(current)}. "
-        "No conversion factor is applied. A sourced factor will be added later."
+        "No conversion factor is applied."
     )
     LOGGER.warning(message)
     print(message)
     return True
 
 
-def _path_records(frame: pd.DataFrame, manifest: Path, split_name: str) -> list[dict]:
+def assert_test_score_allowed(dataset: str, allow_final_test: bool) -> None:
+    """INCYDE test storms are not scored unless ``--allow-final-test`` is set.
+
+    That covers Bean's default split and ``year_holdout_2019``.
+    """
+    if str(dataset).strip().lower() == "incyde" and not allow_final_test:
+        raise RuntimeError(
+            "refusing to score INCYDE test storms without --allow-final-test. "
+            "This applies to the default storm split and to split year_holdout_2019."
+        )
+
+
+def _path_records(
+    frame: pd.DataFrame,
+    manifest: Path,
+    split_name: str,
+    wind_column: str,
+    angles: np.ndarray | None = None,
+) -> list[dict]:
     rows = frame[frame["split"] == split_name].reset_index(drop=True)
     if rows.empty:
         raise ValueError(f"split {split_name} has no rows")
     labels = [None if pd.isna(value) else str(value) for value in rows["_class"]]
     paths = [str(resolve_image(manifest, path)) for path in rows["image_path"].tolist()]
-    winds = rows["wind_speed_kt"].to_numpy(dtype=np.float64)
-    return [
-        {"path": paths[index], "wind": float(winds[index]), "label": labels[index], "weight": 1.0}
-        for index in range(len(rows))
-    ]
+    winds = rows[wind_column].to_numpy(dtype=np.float64)
+    raw = rows["wind_speed_kt"].to_numpy(dtype=np.float64)
+    # wind_kt_scale maps a 3-minute prediction back to the raw label.
+    # A run forced onto the raw column already predicts in raw knots.
+    if wind_column == "wind_kt_3min" and "wind_kt_scale" in rows.columns:
+        scale = rows["wind_kt_scale"].to_numpy(dtype=np.float64)
+    else:
+        scale = np.ones(len(rows), dtype=np.float64)
+    records = []
+    for index in range(len(rows)):
+        angle = None if angles is None else float(angles[index])
+        records.append(
+            {
+                "path": paths[index],
+                "wind": float(winds[index]),
+                "raw_wind": float(raw[index]),
+                "scale": float(scale[index]),
+                "label": labels[index],
+                "weight": 1.0,
+                "angle": angle,
+            }
+        )
+    return records
+
+
+def training_angles(n_rows: int, seed: int, enabled: bool) -> np.ndarray | None:
+    """One seeded degree per train row. Val and test pass ``enabled`` false."""
+    if not enabled or n_rows < 1:
+        return None
+    return np.random.default_rng(int(seed)).uniform(0.0, 360.0, size=int(n_rows))
 
 
 def _parity_side(config: dict, frame: pd.DataFrame) -> int:
@@ -1306,6 +1459,32 @@ def _current_periods(report: dict) -> set[str]:
     return periods
 
 
+def run_is_synthetic(dataset: str, frame: pd.DataFrame) -> bool:
+    """Smoke is synthetic. INCYDE aug copies do not mark a real run synthetic.
+
+    ``manifest_is_synthetic`` stays true when any row is synthetic. A real
+    INCYDE extract has original frames plus train-only ``rot_180`` copies.
+    Those copies are flagged and the run is still a real-data run.
+    """
+    if dataset == "smoke":
+        return True
+    if dataset == "incyde":
+        flags = [parse_is_synthetic(value) for value in frame["is_synthetic"].tolist()]
+        return not any(not flag for flag in flags)
+    return manifest_is_synthetic(frame)
+
+
+def normalization_frame(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
+    """Train-split stats see original INCYDE frames, not ``rot_180`` copies."""
+    if dataset != "incyde" or "is_synthetic" not in frame.columns:
+        return frame
+    flags = [parse_is_synthetic(value) for value in frame["is_synthetic"].tolist()]
+    kept = frame.loc[[not flag for flag in flags]].reset_index(drop=True)
+    if kept.empty or not bool((kept["split"].astype(str) == "train").any()):
+        raise LeakageError("INCYDE normalization needs original train frames")
+    return kept
+
+
 def run_training(
     config: dict,
     *,
@@ -1315,6 +1494,7 @@ def run_training(
     device: str | None = None,
     resume: str | Path | None = None,
     init_from: str | Path | None = None,
+    allow_final_test: bool = False,
 ) -> Path:
     """Fit one dataset and write the run record under ``paths.runs``.
 
@@ -1344,6 +1524,8 @@ def run_training(
         dataset_name = str(resolved["data"]["dataset"]).strip().lower()
     if dataset_name not in _DATASETS:
         raise ValueError(f"dataset must be one of {', '.join(_DATASETS)}")
+    if dataset_name == "incyde":
+        resolved["data"]["wind_averaging"] = "3min"
     if saved is not None and str(saved["dataset"]) != dataset_name:
         raise RuntimeError(
             f"resume dataset is {saved['dataset']} but this command asked for {dataset_name}"
@@ -1381,13 +1563,19 @@ def run_training(
     if saved is None:
         frame, n_excluded = load_training_frame(dataset_name, resolved)
         frame = apply_frame_cache(frame, dataset_name, resolved["paths"].get("frame_cache"))
-        refuse_mixed_resolution(frame, dataset_name)
+        refuse_mixed_resolution(
+            frame, dataset_name, parse_image_size(resolved["data"]["image_size"])
+        )
         wind_period = assert_wind_averaging(resolved, frame)
-        synthetic = dataset_name == "smoke" or manifest_is_synthetic(frame)
+        synthetic = run_is_synthetic(dataset_name, frame)
         seed = int(resolved["project"]["seed"])
         _set_seed(seed)
-        assigned = assign_project_split(frame, resolved)
-        assigned["_class"] = project_labels(assigned, resolved)
+        wind_column = training_wind_column(resolved)
+        if dataset_name == "incyde":
+            assigned = frame.copy()
+        else:
+            assigned = assign_project_split(frame, resolved)
+        assigned["_class"] = project_labels(assigned, resolved, wind_column)
         groups = storm_ids_by_split(assigned)
         if not groups["train"] or not groups["val"] or not groups["test"]:
             raise LeakageError("train, val, and test storms are all required")
@@ -1397,7 +1585,7 @@ def run_training(
         manifest_path = run_dir / "split_manifest.csv"
         assigned.drop(columns=["_class"], errors="ignore").to_csv(manifest_path, index=False)
         labeled = assigned.copy()
-        labeled["_class"] = project_labels(labeled, resolved)
+        labeled["_class"] = project_labels(labeled, resolved, wind_column)
         start_epoch = 0
         prior_history: list = []
         restored_stopper = None
@@ -1410,10 +1598,11 @@ def run_training(
         manifest_path = run_dir / "split_manifest.csv"
         labeled = load_manifest(manifest_path)
         wind_period = assert_wind_averaging(resolved, labeled)
-        synthetic = dataset_name == "smoke" or manifest_is_synthetic(labeled)
+        synthetic = run_is_synthetic(dataset_name, labeled)
         seed = int(saved.get("seed", resolved["project"]["seed"]))
         _set_seed(seed)
-        labeled["_class"] = project_labels(labeled, resolved)
+        wind_column = training_wind_column(resolved)
+        labeled["_class"] = project_labels(labeled, resolved, wind_column)
         groups = storm_ids_by_split(labeled)
         if not groups["train"] or not groups["val"] or not groups["test"]:
             raise LeakageError("train, val, and test storms are all required")
@@ -1430,7 +1619,7 @@ def run_training(
         already_stopped = bool(saved.get("stopped_early"))
 
     size_head = False
-    stats = fit_split_normalization(labeled, manifest_path, resolved)
+    stats = fit_split_normalization(normalization_frame(labeled, dataset_name), manifest_path, resolved)
     if stats.source_split != "train":
         raise LeakageError("normalization stats may be fit on the train split only")
     dataset_stats = norm_by_dataset(dataset_name, stats)
@@ -1443,57 +1632,62 @@ def run_training(
     torch = _torch()
     generator = torch.Generator()
     generator.manual_seed(seed)
+    train_count = int((labeled["split"].astype(str) == "train").sum())
+    train_records = _path_records(
+        labeled,
+        manifest_path,
+        "train",
+        wind_column,
+        training_angles(train_count, seed, dataset_name == "incyde"),
+    )
+    val_records = _path_records(labeled, manifest_path, "val", wind_column, None)
     train_loader = build_loader(
-        PathFrames(
-            _path_records(labeled, manifest_path, "train"),
-            image_size,
-            stats.mean,
-            stats.std,
-            max_missing,
-            known,
-        ),
+        PathFrames(train_records, image_size, stats.mean, stats.std, max_missing, known),
         batch_size=batch_size,
         shuffle=True,
         num_workers=workers,
         generator=generator,
     )
     val_loader = build_loader(
-        PathFrames(
-            _path_records(labeled, manifest_path, "val"),
-            image_size,
-            stats.mean,
-            stats.std,
-            max_missing,
-            known,
-        ),
+        PathFrames(val_records, image_size, stats.mean, stats.std, max_missing, known),
         batch_size=batch_size,
         shuffle=False,
         num_workers=workers,
     )
-    test_loader = build_loader(
-        PathFrames(
-            _path_records(labeled, manifest_path, "test"),
-            image_size,
-            stats.mean,
-            stats.std,
-            max_missing,
-            known,
-        ),
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=workers,
-    )
+    score_test = True
+    test_refusal = None
+    try:
+        assert_test_score_allowed(dataset_name, allow_final_test)
+    except RuntimeError as exc:
+        score_test = False
+        test_refusal = str(exc)
+    test_records = None
+    test_loader = None
+    if score_test:
+        test_records = _path_records(labeled, manifest_path, "test", wind_column, None)
+        test_loader = build_loader(
+            PathFrames(test_records, image_size, stats.mean, stats.std, max_missing, known),
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=workers,
+        )
     model = build_net(resolved, size_head=size_head)
     if not any(layer.__class__.__name__ == "Dropout" for layer in model.modules()):
         raise RuntimeError("MC-dropout needs a Dropout layer left in the network")
     parent_run_id = None
     parent_sha = None
     parent_periods: set[str] = set()
+    parent_label = None
     if init_from is not None:
-        parent_run_id, parent_sha, parent_periods = load_init_weights(model, init_from, resolved)
+        parent_run_id, parent_sha, parent_periods, parent_label = load_init_weights(
+            model, init_from, resolved
+        )
     if saved is not None:
         model.load_state_dict(saved["state_dict"])
-    mismatch = _warn_wind_mismatch(parent_periods, _current_periods(averaging))
+    label_column = wind_column
+    mismatch = _warn_wind_mismatch(
+        parent_periods, _current_periods(averaging), parent_label, label_column
+    )
     parity = None
     if torch_device.type != "cpu":
         images, winds = seeded_parity_batch(
@@ -1548,13 +1742,28 @@ def run_training(
     if not history:
         raise RuntimeError("training produced no loss curve")
     val_truth, val_pred = _collect_predictions(model, val_loader, torch_device, policy)
-    test_truth, test_pred = _collect_predictions(model, test_loader, torch_device, policy)
+    val_raw_pred = back_converted_prediction(
+        val_pred, np.array([row["scale"] for row in val_records], dtype=np.float64)
+    )
+    val_raw_truth = np.array([row["raw_wind"] for row in val_records], dtype=np.float64)
+    if score_test:
+        test_truth, test_pred = _collect_predictions(model, test_loader, torch_device, policy)
+        test_raw_pred = back_converted_prediction(
+            test_pred, np.array([row["scale"] for row in test_records], dtype=np.float64)
+        )
+        test_raw_truth = np.array([row["raw_wind"] for row in test_records], dtype=np.float64)
+        test_metrics = _score_split(test_truth, test_pred, resolved)
+        test_raw_metrics = _score_split(test_raw_truth, test_raw_pred, resolved)
+    else:
+        test_metrics = {"scored": False, "reason": test_refusal}
+        test_raw_metrics = {"scored": False, "reason": test_refusal}
     checkpoint_name = str(resolved["paths"]["checkpoint_name"])
     if not checkpoint_name or checkpoint_name != Path(checkpoint_name).name:
         raise ValueError("paths.checkpoint_name must be a file name, not a path")
     checkpoint = run_dir / checkpoint_name
     split_ids = {name: sorted(groups[name]) for name in ("train", "val", "test")}
-    train_winds = labeled.loc[labeled["split"] == "train", "wind_speed_kt"].to_numpy(dtype=np.float64)
+    train_winds = labeled.loc[labeled["split"] == "train", wind_column].to_numpy(dtype=np.float64)
+    conversion_note = run_conversion_note(labeled)
     properties = xpu_device_properties(torch_device)
     commit = git_commit()
     payload = {
@@ -1578,6 +1787,8 @@ def run_training(
         "wind_averaging_s": wind_averaging_seconds(wind_period),
         "wind_averaging_by_split": averaging,
         "wind_averaging_mismatch": bool(mismatch),
+        "label_column": label_column,
+        "wind_conversion": conversion_note,
         "split": {
             "strategy": str(resolved["split"]["strategy"]),
             "seed": int(resolved["split"]["seed"]),
@@ -1635,6 +1846,8 @@ def run_training(
         "wind_averaging_s": wind_averaging_seconds(wind_period),
         "wind_averaging_by_split": averaging,
         "wind_averaging_mismatch": bool(mismatch),
+        "label_column": label_column,
+        "wind_conversion": conversion_note,
         "parent_run_id": None if parent_run_id is None else str(parent_run_id),
         "parent_checkpoint_sha256": parent_sha,
         "n_excluded": int(n_excluded),
@@ -1644,7 +1857,9 @@ def run_training(
         "split_storm_ids": split_ids,
         "scored_by": "src.evaluate.score_winds",
         "val": _score_split(val_truth, val_pred, resolved),
-        "test": _score_split(test_truth, test_pred, resolved),
+        "val_raw": _score_split(val_raw_truth, val_raw_pred, resolved),
+        "test": test_metrics,
+        "test_raw": test_raw_metrics,
         "device": torch_device.type,
         "device_requested": device_name,
         "precision": policy.precision,
@@ -1660,6 +1875,11 @@ def run_training(
         "norm_by_dataset": dataset_stats,
         "note": SMOKE_BANNER if synthetic else NOT_A_FORECAST,
     }
+    if str(resolved["split"]["strategy"]).strip().lower() == "year_holdout_2019":
+        from src.incyde import YEAR_HOLDOUT_NOTE
+
+        metrics["year_holdout_2019"] = YEAR_HOLDOUT_NOTE
+        metrics["year_holdout_2019_indicative"] = True
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
     if synthetic:
         print(SMOKE_BANNER)
@@ -1681,6 +1901,11 @@ def main(argv: list[str] | None = None) -> Path:
     parser.add_argument("--device", choices=("auto", "xpu", "cuda", "cpu"), default=None)
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--init-from", type=Path, default=None)
+    parser.add_argument(
+        "--allow-final-test",
+        action="store_true",
+        help="Score INCYDE test storms. Without this flag the test split is withheld.",
+    )
     args = parser.parse_args(argv)
     config = load_config(args.config)
     return run_training(
@@ -1691,6 +1916,7 @@ def main(argv: list[str] | None = None) -> Path:
         device=args.device,
         resume=args.resume,
         init_from=args.init_from,
+        allow_final_test=bool(args.allow_final_test),
     )
 
 
