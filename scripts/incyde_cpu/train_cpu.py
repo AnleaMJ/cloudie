@@ -68,6 +68,11 @@ def git_sha() -> str | None:
         return None
 
 
+def sha256_file(path) -> str:
+    import hashlib
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def git_dirty() -> list[str]:
     """Paths with uncommitted changes when the run started (empty = clean)."""
     try:
@@ -129,7 +134,8 @@ def rotate_batch(images: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
 class Data:
     """Normalised (N, 1, S, S) tensor plus labels for one set of rows."""
 
-    def __init__(self, images, winds, labels, known, storms, alt=None):
+    def __init__(self, images, winds, labels, known, storms, alt=None, on_fix=None):
+        self.on_fix = None if on_fix is None else np.asarray(on_fix, dtype=object)
         self.images = images
         self.winds = torch.tensor(winds, dtype=torch.float32)
         index = {name: i for i, name in enumerate(known)}
@@ -309,14 +315,38 @@ def evaluate(model, data: Data, cfg, device, mask, train_winds, train_labels, *,
     b7["accuracy"] = float(np.mean(t7 == maj7))
     b7["majority_class"] = str(vals[int(np.argmax(counts))])
     out["baseline_majority_imd7"] = b7
+    if data.on_fix is not None:
+        sel = data.on_fix == "true"
+        sub = {"n_rows": int(sel.sum()), "n_storms": int(len(set(data.storms[sel].tolist()))),
+               "n_unknown": int((data.on_fix == "unknown").sum())}
+        if sel.any():
+            sub["wind"] = regression_metrics(truth[sel], pw[sel])
+            sub["baseline_train_mean_wind"] = regression_metrics(truth[sel], mean_pred[sel])
+            sub["wind_by_true_class"] = metrics_by_class(truth[sel], pw[sel], true_cls[sel])
+            lab = sel & labelled
+            t5 = true_cls[lab]
+            p5 = heads["binned_wind"][lab]
+            r5 = classification_metrics(t5, p5, known)
+            r5["accuracy"] = float(np.mean(t5 == p5))
+            sub["category_binned_wind"] = r5
+            r7 = classification_metrics(t7[sel], p7[sel], IMD7_NAMES)
+            r7["accuracy"] = float(np.mean(t7[sel] == p7[sel]))
+            sub["category_imd7_from_wind"] = r7
+        out["subset_on_fix"] = sub
     out["n_rows"] = int(len(truth))
     out["n_storms"] = int(len(set(data.storms.tolist())))
     return out, pw, logits
 
 
 # ------------------------------------------------------------------ data
-def load_incyde(cache: Path, size: int):
+def load_incyde(cache: Path, size: int, flags_csv: Path | None = None):
     index = pd.read_csv(cache / "incyde_index.csv", low_memory=False)
+    flags_csv = flags_csv or (REPO / "incyde/audit/frame_flags.csv")
+    if Path(flags_csv).is_file():
+        # on_fix from incyde/audit/frame_flags.csv (#36/#38), joined on filename;
+        # augmented copies inherit their source frame's flag; unknown stays unknown
+        flags = pd.read_csv(flags_csv, dtype=str).set_index("filename")["on_fix"].str.lower()
+        index["on_fix"] = index["source_filename"].map(flags).fillna("unknown")
     images = np.load(cache / f"incyde_{size}.npy", mmap_mode="r")
     return index, images
 
@@ -347,7 +377,8 @@ def incyde_sets(index, images, rows_train, rows_eval, cfg, known):
         sel = rows & orig
         ev = index[sel]
         evals[name] = Data(tensor(images[np.where(sel)[0]]), ev["wind_kt_3min"].to_numpy(),
-                           class_of(ev["wind_kt_3min"].to_numpy(), cfg), known, ev["storm_id"].to_numpy())
+                           class_of(ev["wind_kt_3min"].to_numpy(), cfg), known, ev["storm_id"].to_numpy(),
+                           on_fix=ev["on_fix"].to_numpy() if "on_fix" in ev.columns else None)
     return train, evals, alt, {"mean": mean, "std": std, "source_split": "train"}
 
 
@@ -493,7 +524,7 @@ def build_model(cfg, init_from):
 
 def cmd_finetune(args, cfg, device):
     size = int(cfg["data"]["image_size"])
-    index, images = load_incyde(args.cache, size)
+    index, images = load_incyde(args.cache, size, args.frame_flags_csv)
     known = list(cfg["data"]["imd5_names"])
     mask = circle_mask(size) if cfg["augment"].get("masked_rotation") else None
     seed = int(cfg["project"]["seed"])
@@ -579,7 +610,7 @@ def cmd_finetune(args, cfg, device):
         "rows_originals": {s: int((orig & (split == s)).sum()) for s in ("train", "val", "test")},
         "rows_rot_180_train": int(((~orig) & (split == "train")).sum()),
         "storms": {s: int(index.loc[split == s, "storm_id"].nunique()) for s in ("train", "val", "test")},
-        "cv_folds_source": str(args.cv_folds_csv) if args.cv_folds_csv else "built: seed 42, PR #35 rule (cooccurrence groups round-robin)",
+        "cv_folds_source": f"{args.cv_folds_csv} (sha256 {sha256_file(args.cv_folds_csv)})" if args.cv_folds_csv else "built: seed 42, PR #35 rule (cooccurrence groups round-robin)",
         "test_split": "sealed: never loaded for training, model selection or reporting",
     }
     (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
@@ -603,6 +634,7 @@ def main():
     p.add_argument("--no-convert", dest="convert", action="store_false")
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--skip-cv", action="store_true")
+    p.add_argument("--frame-flags-csv", type=Path, default=None, help="default incyde/audit/frame_flags.csv")
     p.add_argument("--cv-folds-csv", type=Path, default=None, help="storm_id,fold table used verbatim (e.g. SWE's)")
     p.add_argument("--set", action="append", default=[], help="override, e.g. train.lr=0.0005")
     args = p.parse_args()
