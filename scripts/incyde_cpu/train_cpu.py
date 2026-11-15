@@ -76,6 +76,23 @@ def net_config(cfg: dict) -> dict:
     }
 
 
+IMD7_EDGES = (17, 28, 34, 48, 64, 90, 120)  # IMD scale on 3-minute winds (kt)
+IMD7_NAMES = ("D", "DD", "CS", "SCS", "VSCS", "ESCS", "SuCS")
+
+
+def imd7_of(winds: np.ndarray) -> np.ndarray:
+    """IMD class from a 3-minute wind: D 17-27, DD 28-33, CS 34-47, SCS 48-63,
+    VSCS 64-89, ESCS 90-119, SuCS >= 120 kt; below 17 kt is ``below_D``."""
+    out = []
+    for w in np.asarray(winds, dtype=float):
+        name = "below_D"
+        for edge, label in zip(IMD7_EDGES, IMD7_NAMES):
+            if w >= edge - 0.5:  # labels are whole knots; predictions round to the nearest knot
+                name = label
+        out.append(name)
+    return np.array(out, dtype=object)
+
+
 def class_of(winds: np.ndarray, cfg: dict) -> list[str | None]:
     edges = tuple(float(e) for e in cfg["data"]["imd5_edges_kt"])
     names = tuple(str(n) for n in cfg["data"]["imd5_names"])
@@ -195,7 +212,10 @@ def fit(model, train: Data, val: Data | None, cfg: dict, device, *, epochs, aug,
             y = train.winds[idx].to(device)
             c = train.cls[idx].to(device)
             w, lg = model(x)[:2]
-            loss = F.smooth_l1_loss(w.view(-1), y)
+            if tcfg.get("loss", "smooth_l1") == "huber":
+                loss = F.huber_loss(w.view(-1), y, delta=float(tcfg.get("huber_delta_kt", 10.0)))
+            else:
+                loss = F.smooth_l1_loss(w.view(-1), y)
             m = c >= 0
             if clw > 0 and m.any():
                 loss = loss + clw * F.cross_entropy(lg[m], c[m], weight=cw)
@@ -245,6 +265,21 @@ def evaluate(model, data: Data, cfg, device, mask, train_winds, train_labels, *,
         res["confusion_labels"] = list(known)
         res["confusion_matrix"] = confusion_matrix(t, p, labels=list(known)).tolist()
         out[f"category_{name}"] = res
+    # IMD 7-class scale from the predicted wind (no separate head)
+    t7, p7 = imd7_of(truth), imd7_of(np.round(pw))
+    res7 = classification_metrics(t7, p7, IMD7_NAMES)
+    res7["accuracy"] = float(np.mean(t7 == p7))
+    res7["confusion_labels"] = ["below_D", *IMD7_NAMES]
+    res7["confusion_matrix"] = confusion_matrix(t7, p7, labels=["below_D", *IMD7_NAMES]).tolist()
+    out["category_imd7_from_wind"] = res7
+    out["wind_by_true_imd7"] = metrics_by_class(truth, pw, t7)
+    if bootstrap:
+        out["wind_by_true_class_bootstrap"] = {
+            str(c): storm_bootstrap_metrics(truth[true_cls == c], pw[true_cls == c], data.storms[true_cls == c], n_resamples=1000, seed=42)
+            for c in pd.unique(true_cls)
+        }
+        for c, row in out["wind_by_true_class_bootstrap"].items():
+            row["indicative_n_storms_lt_3"] = bool(row["n_storms"] < 3)
     # naive baselines, fit on the training rows only
     mean_pred = np.full_like(truth, float(np.mean(train_winds)))
     tl = [l for l in train_labels if l]
@@ -256,6 +291,13 @@ def evaluate(model, data: Data, cfg, device, mask, train_winds, train_labels, *,
     bres["accuracy"] = float(np.mean(t == maj))
     bres["majority_class"] = majority
     out["baseline_majority_class"] = bres
+    tl7 = imd7_of(np.asarray(train_winds))
+    vals, counts = np.unique(tl7, return_counts=True)
+    maj7 = np.array([vals[int(np.argmax(counts))]] * len(t7), dtype=object)
+    b7 = classification_metrics(t7, maj7, IMD7_NAMES)
+    b7["accuracy"] = float(np.mean(t7 == maj7))
+    b7["majority_class"] = str(vals[int(np.argmax(counts))])
+    out["baseline_majority_imd7"] = b7
     out["n_rows"] = int(len(truth))
     out["n_storms"] = int(len(set(data.storms.tolist())))
     return out, pw, logits
@@ -510,6 +552,10 @@ def cmd_finetune(args, cfg, device):
             "baseline_mean_rmse_kt": ms(lambda f: f["baseline_train_mean_wind"]["rmse_kt"]),
             "baseline_majority_accuracy": ms(lambda f: f["baseline_majority_class"]["accuracy"]),
             "baseline_majority_macro_f1": ms(lambda f: f["baseline_majority_class"]["macro_f1"]),
+            "imd7_accuracy": ms(lambda f: f["category_imd7_from_wind"]["accuracy"]),
+            "imd7_macro_f1": ms(lambda f: f["category_imd7_from_wind"]["macro_f1"]),
+            "baseline_majority_imd7_accuracy": ms(lambda f: f["baseline_majority_imd7"]["accuracy"]),
+            "baseline_majority_imd7_macro_f1": ms(lambda f: f["baseline_majority_imd7"]["macro_f1"]),
             "folds": cv,
         }
     prep = json.loads((args.cache / "incyde_prep.json").read_text())
