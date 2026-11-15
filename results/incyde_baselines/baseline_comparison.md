@@ -47,7 +47,7 @@ Those intervals resample storm IDs. The test split is not in that table.
 - label_scope: `INSAT-only`
 - comparability: `INSAT-3D/3DR only. Not comparable with NASA or TCIR tables. Not like-for-like with Agrawal et al. 2024. All metrics use raw 3-minute IMD labels. wind_averaging is 3-min and wind_averaging_s is 180 on every row. There is no 1-minute conversion.`
 - metrics_use: `All metrics use raw 3-minute IMD labels. wind_averaging is 3-min and wind_averaging_s is 180 on every row. There is no 1-minute conversion.`
-- on_fix_definition: `on_fix is joined from incyde/audit/frame_flags.csv on filename. It is true only when that file says true: the UTC timestamp equals an IMD best-track time_resolved for that storm. near_land and dist_to_coast_km come from the same file. unknown stays unknown and is not defaulted to false or zero.`
+- on_fix_definition: `on_fix is joined from incyde/audit/frame_flags.csv on filename. It is true only when that file says true: the UTC timestamp equals an IMD best-track time_resolved for that storm. near_land and distance_to_land_km come from the same file. unknown stays unknown and is not defaulted to false or zero.`
 - augmented_dropped: `82055`
 - default_excluded_originals: `73`
 - flagged_not_default_originals: `90`
@@ -56,7 +56,7 @@ Those intervals resample storm IDs. The test split is not in that table.
 - on_fix_false_rows: `19386`
 - on_fix_unknown_rows: `0`
 - near_land_unknown_rows: `201`
-- dist_to_coast_unknown_rows: `201`
+- distance_to_land_unknown_rows: `201`
 - frame_flags_source: `/agent/repos/cloudie/incyde/audit/frame_flags.csv`
 - originals_before_exclusions: `21313`
 - rows_written: `21240`

@@ -522,7 +522,7 @@ _CARRIED_COLUMNS = (
     "wind_averaging_s",
     "on_fix",
     "near_land",
-    "dist_to_coast_km",
+    "distance_to_land_km",
     "cv_group",
 )
 

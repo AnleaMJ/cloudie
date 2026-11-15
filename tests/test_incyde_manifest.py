@@ -88,7 +88,7 @@ def _write_tree(root: Path) -> tuple[Path, Path, Path]:
             ],
             "on_fix": ["false", "true", "unknown", "false", "true", "false"],
             "near_land": ["false", "true", "unknown", "false", "false", "unknown"],
-            "dist_to_coast_km": ["10.0", "20.5", "", "5", "1", "unknown"],
+            "distance_to_land_km": ["10.0", "20.5", "", "5", "1", "unknown"],
         }
     ).to_csv(flags, index=False)
     return labels, split, exclusions, flags
@@ -121,12 +121,12 @@ def test_default_manifest_keeps_flagged_rows_and_raw_labels(tmp_path: Path) -> N
     assert bool(by_id.loc["12NOV2013_0600_1", "on_fix"]) is True
     assert by_id.loc["13NOV2013_0830_1", "on_fix"] == "unknown"
     assert by_id.loc["13NOV2013_0830_1", "near_land"] == "unknown"
-    assert by_id.loc["13NOV2013_0830_1", "dist_to_coast_km"] == "unknown"
+    assert by_id.loc["13NOV2013_0830_1", "distance_to_land_km"] == "unknown"
     assert by_id.loc["15NOV2013_0300_1", "near_land"] == "unknown"
-    assert by_id.loc["15NOV2013_0300_1", "dist_to_coast_km"] == "unknown"
+    assert by_id.loc["15NOV2013_0300_1", "distance_to_land_km"] == "unknown"
     assert summary["on_fix_unknown_rows"] == 1
     assert summary["near_land_unknown_rows"] == 2
-    assert summary["dist_to_coast_unknown_rows"] == 2
+    assert summary["distance_to_land_unknown_rows"] == 2
     assert by_id.loc["12NOV2013_0530_1", "split"] == "train"
     assert by_id.loc["13NOV2013_0830_1", "split"] == "val"
     assert by_id.loc["14NOV2013_0000_1", "split"] == "test"

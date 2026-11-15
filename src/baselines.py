@@ -1619,7 +1619,7 @@ def _run_metadata(
             "on_fix_false_rows",
             "on_fix_unknown_rows",
             "near_land_unknown_rows",
-            "dist_to_coast_unknown_rows",
+            "distance_to_land_unknown_rows",
             "frame_flags_source",
             "originals_before_exclusions",
             "rows_written",

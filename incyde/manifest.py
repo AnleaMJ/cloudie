@@ -22,10 +22,10 @@ It is not redrawn. ``cv_group`` is ``cooccurrence_group`` so a later grouped
 CV can keep concurrent storms in one fold. The INCYDE ``Set`` column is
 stored as ``source_split`` and is not the modeling split.
 
-``on_fix``, ``near_land``, and ``dist_to_coast_km`` come from
+``on_fix``, ``near_land``, and ``distance_to_land_km`` come from
 ``incyde/audit/frame_flags.csv``, joined on the original filename.
 ``on_fix`` stays the file's true or false. ``near_land`` and
-``dist_to_coast_km`` may be ``unknown``. Unknown is not turned into
+``distance_to_land_km`` may be ``unknown``. Unknown is not turned into
 false or zero.
 
 Pixels are an 8-bit IR render, not calibrated brightness temperature.
@@ -66,7 +66,7 @@ ON_FIX_DEFINITION = (
     "on_fix is joined from incyde/audit/frame_flags.csv on filename. "
     "It is true only when that file says true: the UTC timestamp equals "
     "an IMD best-track time_resolved for that storm. "
-    "near_land and dist_to_coast_km come from the same file. "
+    "near_land and distance_to_land_km come from the same file. "
     "unknown stays unknown and is not defaulted to false or zero."
 )
 _SYNOPTIC_UTC_HOURS = frozenset({0, 3, 6, 9, 12, 15, 18, 21})
@@ -221,7 +221,7 @@ def read_frame_flags(path: str | Path) -> pd.DataFrame:
     if not file_path.is_file():
         raise IncydeDataError(f"missing frame flags {file_path}")
     raw = pd.read_csv(file_path, dtype=str, keep_default_na=False)
-    missing = {"filename", "on_fix", "near_land", "dist_to_coast_km"} - set(raw.columns)
+    missing = {"filename", "on_fix", "near_land", "distance_to_land_km"} - set(raw.columns)
     if missing:
         raise IncydeDataError(f"frame flags missing {sorted(missing)}")
     out = pd.DataFrame({"filename": raw["filename"].map(lambda value: Path(str(value)).name)})
@@ -235,9 +235,9 @@ def read_frame_flags(path: str | Path) -> pd.DataFrame:
         _flag_token(value, "near_land", name)
         for value, name in zip(raw["near_land"], out["filename"], strict=True)
     ]
-    distance = raw["dist_to_coast_km"].astype(str).str.strip()
+    distance = raw["distance_to_land_km"].astype(str).str.strip()
     blank = distance.eq("") | distance.str.lower().isin({"nan", "none", "<na>", "null"})
-    out["dist_to_coast_km"] = np.where(blank | distance.str.lower().eq("unknown"), "unknown", distance)
+    out["distance_to_land_km"] = np.where(blank | distance.str.lower().eq("unknown"), "unknown", distance)
     return out
 
 
@@ -366,7 +366,7 @@ def build_manifest(
         )
     on_fix_token = merged["filename"].map(flags["on_fix"]).astype(str)
     near_land = merged["filename"].map(flags["near_land"]).astype(str)
-    distance = merged["filename"].map(flags["dist_to_coast_km"]).astype(str)
+    distance = merged["filename"].map(flags["distance_to_land_km"]).astype(str)
     on_fix_value = [
         True if token == "true" else False if token == "false" else "unknown"
         for token in on_fix_token.tolist()
@@ -391,7 +391,7 @@ def build_manifest(
             "cv_group": merged["cooccurrence_group"].map(lambda value: str(int(value))),
             "on_fix": on_fix_value,
             "near_land": near_land.tolist(),
-            "dist_to_coast_km": distance.tolist(),
+            "distance_to_land_km": distance.tolist(),
             "timestamp": merged["timestamp"].astype(str),
             "filename_time_ist": merged["filename_time_ist"].astype(str),
             "basin": basin.astype(str) if isinstance(basin, pd.Series) else basin,
@@ -435,7 +435,7 @@ def build_manifest(
         "cv_group",
         "on_fix",
         "near_land",
-        "dist_to_coast_km",
+        "distance_to_land_km",
         "timestamp",
         "wind_averaging_s",
         "qc_flag",
@@ -472,7 +472,7 @@ def build_manifest(
         "on_fix_false_rows": int((on_fix_token == "false").sum()),
         "on_fix_unknown_rows": int((on_fix_token == "unknown").sum()),
         "near_land_unknown_rows": int((near_land == "unknown").sum()),
-        "dist_to_coast_unknown_rows": int((distance == "unknown").sum()),
+        "distance_to_land_unknown_rows": int((distance == "unknown").sum()),
         "frame_flags_source": str(flags_file),
         "modeling_split": by_split,
         "cv_group": "cooccurrence_group",
