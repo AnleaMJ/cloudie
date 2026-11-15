@@ -27,6 +27,9 @@ Do not commit imagery or best-track dumps. CI must not download them.
   `wind_averaging=1min`. The competition train/test sides share storms,
   so they are kept only as `source_split`; use storm-wise splits on the
   union. Tests use tiny fake tables and never download.
+  There is no distance-to-land column. `storm_id` is a 3-letter id and
+  the only time is `relative_time_s`, so this loader does not join
+  IBTrACS. `near_land` stays unknown. See `nasa_tc/audit/README.md`.
 - TCIR: https://github.com/BoyoChen/TCIR — MIT repository, 201×201, four
   channels. Confirm satellite redistribution terms separately. Southern
   Hemisphere storms are not silently flipped. Phase 2 features use the
@@ -44,6 +47,10 @@ Do not commit imagery or best-track dumps. CI must not download them.
   north-south mirror and sets `flipped`; the default is no flip. TCIR has
   no official split in these files, so there is no `source_split`. The
   2017 file `TCIR-ALL_2017.h5` is a separate year and is not loaded here.
+  `src.tcir` joins `tcir/audit/distance_to_land.csv` on `sample_id`
+  (`distance_to_land_km`, `near_land` at 20 km). Unmatched rows and blank
+  distances stay unknown. `labels.open_water_km` is the threshold the
+  training label uses. The audit CSV is not a coastline download.
   ATLN and EPAC storms from 2003–2016 overlap NASA Tropical Storm storms;
   map both to one storm key before splitting a combined manifest.
 - INCYDE, the cropped INSAT-3D North Indian Ocean cyclone set, Zenodo
@@ -54,7 +61,11 @@ Do not commit imagery or best-track dumps. CI must not download them.
   filename `obj` is not. The split and the exclusion list committed under
   `incyde/audit/` are the source of truth. Labels are IMD 3-minute winds.
   About 91% of in-span original labels are interpolated, and only two
-  storms reach SuCS. Tests use tiny fixtures and never download.
+  storms reach SuCS. `src.incyde` joins `incyde/audit/frame_flags.csv`
+  on the source filename and carries `on_fix`, `distance_to_land_km`,
+  and `near_land`. Augmented copies inherit the source row. Unknown
+  stays unknown. The 3-minute label is not rescaled. Tests use tiny
+  fixtures and never download.
 - IBTrACS v4: https://doi.org/10.25921/82ty-9e16. Labels only.
 - INSAT-3D / 3DR: MOSDAC, registration required, not redistributed here.
   The intensity page reads the public Infrared-1 JPEG on

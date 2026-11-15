@@ -112,6 +112,9 @@ def test_manifest_columns_exclusions_and_no_split(fixture_h5, tmp_path):
     manifest, excluded, pixel = tcir.build_manifest([path], tmp_path / "out", block=4)
     assert "split" not in manifest.columns
     assert "source_split" not in manifest.columns
+    # Fixture sample ids are not in the audit table. Unknown stays unknown.
+    assert manifest["distance_to_land_km"].isna().all()
+    assert set(manifest["near_land"]) == {"unknown"}
     for column in ("storm_id", "timestamp", "wind_speed_kt", "basin", "lat", "lon", "hemisphere"):
         assert manifest[column].notna().all()
     assert set(manifest["source"]) == {"tcir"}

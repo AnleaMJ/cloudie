@@ -179,14 +179,21 @@ That factor is derived from the at-sea gust factors in those tables. It is
 not a WMO constant. It is meant for open water more than
 `labels.open_water_km` (20) kilometres offshore.
 
-NASA has no land column. TCIR has latitude and longitude and no distance
-to land, and this repo has no coastline, so those rows are not treated as
-open water. `near_land` is `unknown` and `conversion_exposure_flag` is
-`unknown`. The 0.93 factor is still applied. A row that already carries
-`distance_to_land_km`, `near_land`, or `landfall` is not converted in
-silence. `labels.near_land_policy` `flag` (the default) multiplies by 0.93
-and sets `conversion_exposure_flag` true. `raw` leaves that row at the
-1-minute label and sets the same flag.
+`labels.near_land_policy` `flag` (the default) multiplies a near-land
+1-minute row by 0.93 and sets `conversion_exposure_flag` true. `raw`
+leaves that row at the 1-minute label and sets the same flag. Open water
+is a distance strictly greater than `labels.open_water_km` (20 km).
+
+TCIR distances come from `tcir/audit/distance_to_land.csv`, joined on
+`sample_id`. A row the CSV does not list, and a listed row with a blank
+distance, stay `near_land` `unknown`. The 0.93 factor is still applied
+and `conversion_exposure_flag` stays `unknown`. The blank distance is not
+filled with 0.
+
+NASA has no such join. The loader's `storm_id` is a 3-letter competition
+id and the only time is `relative_time_s`, so an IBTrACS match would be
+invented. `near_land` stays `unknown` and the 0.93 factor is applied.
+The reason is written in `nasa_tc/audit/README.md`. Do not add a mapping.
 
 About 91% of INCYDE original-frame labels are interpolated between IMD
 fixes, not observations. Only two storms are SuCS (KYAAR and AMPHAN), so
@@ -211,10 +218,13 @@ Images follow `DDMONYYYY_HHMM_<obj>[_aug].jpg`. The clock in the name is
 IST. The manifest stores `time_ist` and `time_utc` (IST minus 5 hours 30
 minutes). `Sequence` is the storm key and is joined to
 `incyde/audit/storm_split.csv`. `obj` is `object_index`. It is not a
-storm id. `on_fix` is omitted: the audit CSVs do not say which frames sit
-on an IMD best-track time. There is no per-frame landfall flag either.
-`basin` value `LAND` is an IMD basin code, not a landfall. `near_land` is
-`unknown`.
+storm id. `on_fix`, `distance_to_land_km`, and `near_land` are joined
+from `incyde/audit/frame_flags.csv` on the source filename. A `rot_180`
+copy inherits that source row. A filename the table does not list, or a
+cell the audit left blank, stays unknown: `on_fix` is `unknown` rather
+than false, and the distance is null rather than 0. The labels are
+already 3-minute, so the join does not rescale them. `basin` value
+`LAND` is an IMD basin code, not a landfall.
 
 The default split is Bean's grouped split in `storm_split.csv`: 60 train,
 14 val, 17 test storms. Concurrent storms share a `cooccurrence_group`
@@ -265,6 +275,35 @@ The loader then resizes onto that grid.
 ```bash
 python -m src.train --config config/config.yaml --dataset incyde --model simplecnn --max-steps 2 --device cpu
 ```
+
+## Frame flags, land distance, and class balance
+
+`incyde.on_fix_only_eval` defaults to false. When it is true, `metrics.json`
+also has `val_on_fix` and `val_raw_on_fix`, scored only on validation rows
+whose `on_fix` is true. `val` and `val_raw` stay the full validation split.
+Unknown `on_fix` rows are not included in the extra slice. Test storms are
+still withheld unless `--allow-final-test` is set. This does not change
+the 3-minute label.
+
+`train.loss_weighting` is `none` (default), `inverse_freq`, or
+`sqrt_inverse_freq`. `none` is the unweighted Smooth L1 mean, which is the
+previous training loss. The other two reweight that loss by the project's
+five bins on `wind_kt_3min`. Counts come from original train rows only.
+Synthetic copies, the validation fold, and the test storms are not in the
+counts. `storm_cv` is respected because the val fold is already `split`
+`val` before the counts are taken. A bin with no train originals has a
+null weight. It is not given a frequency from another split. Rows below
+17 kt are not one of the five bins and keep weight 1.
+
+`train.balanced_sampling` defaults to false, which keeps the shuffled
+loader. When true, training draws with replacement using the
+inverse-frequency weights, so each bin that occurs in the train originals
+has the same expected count. The sampler does not include val or test.
+The chosen mode, the balanced-sampling flag, the train-original counts,
+and the weights are stored on the run as `intensity_balance` in
+`metrics.json` and on the checkpoint. The split manifest also has
+`intensity_bin` and `loss_weight`. With the defaults those weights are 1
+and the loss is not scaled by them.
 
 ## Fine-tune
 

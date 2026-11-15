@@ -9,11 +9,14 @@ storm key. The trailing ``obj`` index is not a storm id. The default split
 and the exclusion list are ``incyde/audit/storm_split.csv`` and
 ``incyde/audit/exclusions.csv``.
 
-``on_fix`` is not on those audit outputs, and the committed files do not
-say which frames sit on an IMD best-track time, so this loader omits it.
-There is also no per-frame landfall flag. ``near_land`` is unknown.
-``basin`` value ``LAND`` is the IMD basin of a land depression, not a
-frame landfall.
+``on_fix``, ``distance_to_land_km``, and ``near_land`` are joined from
+``incyde/audit/frame_flags.csv`` on the source filename. A ``rot_180``
+copy inherits that source row. A filename the table does not list stays
+unknown: ``on_fix`` is ``unknown``, the distance is null, and
+``near_land`` is ``unknown``. Those gaps are not filled with false or
+zero. The labels are already 3-minute winds, so the join does not
+rescale them. ``basin`` value ``LAND`` is the IMD basin of a land
+depression, not a frame landfall.
 
 Only original frames and ``rot_180`` copies are kept. ``rot_180`` is
 synthetic, stays with its source storm, and is train-only. Flips reverse
@@ -67,6 +70,8 @@ _STORM_ID = re.compile(r"^INCYDE-S\d+_IMD-(?P<year>\d{4})-\d+$")
 _AUDIT_DIR = Path(__file__).resolve().parents[1] / "incyde" / "audit"
 DEFAULT_STORM_SPLIT = _AUDIT_DIR / "storm_split.csv"
 DEFAULT_EXCLUSIONS = _AUDIT_DIR / "exclusions.csv"
+DEFAULT_FRAME_FLAGS = _AUDIT_DIR / "frame_flags.csv"
+_FRAME_FLAG_COLUMNS = ("filename", "on_fix", "distance_to_land_km", "near_land")
 
 
 def imd_class_of(wind_kt: float) -> str:
@@ -177,6 +182,128 @@ def _is_true(value: object) -> bool:
     if isinstance(value, (bool, np.bool_)):
         return bool(value)
     return str(value).strip().lower() in {"1", "true", "yes", "y", "t"}
+
+
+def _blank_flag(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        return False
+    return str(value).strip().lower() in {"", "nan", "none", "null", "<na>"}
+
+
+def _on_fix_value(value: object) -> bool | str:
+    """Explicit bool, or ``unknown`` when the audit did not decide.
+
+    ``unknown`` is not stored as false. A later on-fix metric uses only
+    the true rows.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if _blank_flag(value):
+        return "unknown"
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "t"}:
+        return True
+    if text in {"0", "false", "no", "n", "f"}:
+        return False
+    if text in {"unknown", "na", "n/a"}:
+        return "unknown"
+    raise ValueError(f"on_fix value {value!r} is not true, false, or unknown")
+
+
+def _near_land_token(value: object) -> str:
+    """``true``, ``false``, or ``unknown``. Blank stays unknown."""
+    if isinstance(value, (bool, np.bool_)):
+        return "true" if bool(value) else "false"
+    if _blank_flag(value):
+        return "unknown"
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "t"}:
+        return "true"
+    if text in {"0", "false", "no", "n", "f"}:
+        return "false"
+    if text in {"unknown", "na", "n/a"}:
+        return "unknown"
+    raise ValueError(f"near_land value {value!r} is not true, false, or unknown")
+
+
+def _distance_km(value: object) -> float:
+    """Kilometres, or NaN when the audit left the cell blank."""
+    if _blank_flag(value):
+        return float("nan")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"distance_to_land_km value {value!r} is not a distance") from exc
+    if not np.isfinite(number):
+        return float("nan")
+    return number
+
+
+def read_frame_flags(path: str | Path | None = None) -> pd.DataFrame:
+    """Original-frame flags. Augmented filenames are not required in the file."""
+    table = pd.read_csv(_optional_path(path, DEFAULT_FRAME_FLAGS))
+    table.columns = [str(column).strip() for column in table.columns]
+    missing = [column for column in _FRAME_FLAG_COLUMNS if column not in table.columns]
+    if missing:
+        raise ValueError(f"frame_flags.csv missing {missing}")
+    on_fix = [_on_fix_value(value) for value in table["on_fix"].tolist()]
+    out = pd.DataFrame(
+        {
+            "filename": table["filename"].astype(str).map(lambda name: Path(name).name),
+            "distance_to_land_km": [_distance_km(value) for value in table["distance_to_land_km"].tolist()],
+            "near_land": [_near_land_token(value) for value in table["near_land"].tolist()],
+        }
+    )
+    # Object dtype so a homogeneous true/false column stays a Python bool
+    # and an unknown cell is not coerced to false.
+    out["on_fix"] = pd.Series(on_fix, index=out.index, dtype=object)
+    if out["filename"].duplicated().any():
+        raise ValueError("frame_flags.csv repeats a filename")
+    return out
+
+
+def _flag_key(frame: pd.DataFrame) -> pd.Series:
+    """Source filename. Augmented copies inherit; they are not their own key."""
+    if "source_frame_id" in frame.columns:
+        return frame["source_frame_id"].astype(str).map(lambda name: Path(name).name)
+    if "filename" in frame.columns:
+        return frame["filename"].astype(str).map(lambda name: Path(_AUG_SUFFIX.sub("", name)).name)
+    raise ValueError("frame flags need source_frame_id or filename")
+
+
+def attach_frame_flags(frame: pd.DataFrame, flags: pd.DataFrame) -> pd.DataFrame:
+    """Add ``on_fix``, ``distance_to_land_km``, and ``near_land``.
+
+    The lookup key is the source filename, so a ``rot_180`` copy receives
+    the original frame's row. A miss stays unknown. Distance is not filled
+    with 0, and ``on_fix`` is not filled with false.
+    """
+    lookup = flags.drop_duplicates("filename").set_index("filename")
+    on_fix: list[object] = []
+    distance: list[float] = []
+    near: list[str] = []
+    for key in _flag_key(frame).tolist():
+        if key not in lookup.index:
+            on_fix.append("unknown")
+            distance.append(float("nan"))
+            near.append("unknown")
+            continue
+        row = lookup.loc[key]
+        if isinstance(row, pd.DataFrame):
+            raise ValueError(f"frame_flags.csv repeats {key}")
+        on_fix.append(_on_fix_value(row["on_fix"]))
+        distance.append(_distance_km(row["distance_to_land_km"]))
+        near.append(_near_land_token(row["near_land"]))
+    out = frame.copy()
+    out["on_fix"] = pd.Series(on_fix, index=out.index, dtype=object)
+    out["distance_to_land_km"] = np.asarray(distance, dtype=float)
+    out["near_land"] = near
+    return out
 
 
 def parse_filename(filename: str) -> dict[str, object]:
@@ -302,6 +429,7 @@ def read_rows(
     manifest_csv: str | Path | None = None,
     storm_split_csv: str | Path | None = None,
     exclusions_csv: str | Path | None = None,
+    frame_flags_csv: str | Path | None = None,
     drop_qc_flags: list[str] | tuple[str, ...] | None = None,
     check_images: bool = True,
 ) -> tuple[pd.DataFrame, int]:
@@ -435,8 +563,10 @@ def read_rows(
             "center_source": "dataset_precentered",
         }
     )
-    # on_fix and landfall are omitted: the audit CSVs do not carry them.
-    return require_valid(frame), int(dropped_count)
+    # Join after the row filter so dropped augs are not looked up. The
+    # source filename is the key; unknown audit cells stay unknown.
+    flagged = attach_frame_flags(frame, read_frame_flags(frame_flags_csv))
+    return require_valid(flagged), int(dropped_count)
 
 
 def build_cv_folds(storms: pd.DataFrame, n_folds: int, seed: int) -> pd.DataFrame:
@@ -601,6 +731,7 @@ def load_frame(config: dict) -> tuple[pd.DataFrame, int]:
         manifest_csv=block["manifest_csv"],
         storm_split_csv=block["storm_split_csv"],
         exclusions_csv=block["exclusions_csv"],
+        frame_flags_csv=block.get("frame_flags_csv"),
         drop_qc_flags=list(block["drop_qc_flags"] or []),
         check_images=True,
     )
@@ -622,6 +753,7 @@ def main(argv: list[str] | None = None) -> Path:
     parser.add_argument("--manifest-csv", type=Path, default=None)
     parser.add_argument("--storm-split", type=Path, default=None)
     parser.add_argument("--exclusions", type=Path, default=None)
+    parser.add_argument("--frame-flags", type=Path, default=None)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--strategy", default="storm_wise")
     parser.add_argument("--archive", type=Path, default=None)
@@ -633,6 +765,7 @@ def main(argv: list[str] | None = None) -> Path:
         manifest_csv=args.manifest_csv,
         storm_split_csv=args.storm_split,
         exclusions_csv=args.exclusions,
+        frame_flags_csv=args.frame_flags,
     )
     assigned, synthetic_dropped = assign_incyde_split(frame, args.strategy)
     args.out.parent.mkdir(parents=True, exist_ok=True)

@@ -14,10 +14,12 @@ from src.incyde import (
     YEAR_HOLDOUT_NOTE,
     assert_archive_md5,
     assign_incyde_split,
+    attach_frame_flags,
     build_cv_folds,
     imd_class_of,
     parse_filename,
     read_exclusions,
+    read_frame_flags,
     read_rows,
     read_storm_split,
     storm_year,
@@ -121,7 +123,10 @@ def test_filename_clock_is_ist_and_obj_is_not_the_storm(tmp_path: Path) -> None:
     nine = frame.loc[frame["filename"] == "15JUN2019_1200_9.jpg"] if "filename" in frame.columns else frame.loc[frame["sample_id"] == "15JUN2019_1200_9"]
     assert nine["storm_id"].iloc[0] == "INCYDE-S02_IMD-2019-002"
     assert int(nine["object_index"].iloc[0]) == 9
-    assert "on_fix" not in frame.columns
+    # Fixture names are not in the committed audit table, so the join stays unknown.
+    assert set(frame["on_fix"]) == {"unknown"}
+    assert set(frame["near_land"]) == {"unknown"}
+    assert frame["distance_to_land_km"].isna().all()
     assert "landfall" not in frame.columns
 
 
@@ -164,6 +169,104 @@ def test_default_split_drops_flips_bars_s42_and_eval_synthetics(tmp_path: Path) 
     official = assigned.loc[assigned["sample_id"] == "01JAN2018_0030_1", "incyde_set"].iloc[0]
     assert official == "Test"
     assert assigned.loc[assigned["sample_id"] == "01JAN2018_0030_1", "split"].iloc[0] == "train"
+
+
+def test_frame_flags_inherit_and_keep_unknown(tmp_path: Path) -> None:
+    flags = tmp_path / "frame_flags.csv"
+    flags.write_text(
+        "filename,on_fix,lat,lon,distance_to_land_km,near_land\n"
+        "01JAN2018_0030_1.jpg,true,12.0,80.0,5.0,true\n"
+        "01JAN2018_0600_2.jpg,false,12.0,80.0,,unknown\n"
+        "15JUN2019_1200_9.jpg,false,10.0,70.0,40.0,false\n",
+        encoding="utf-8",
+    )
+    write_images(tmp_path / "images")
+    frame, _dropped = read_rows(
+        tmp_path / "images",
+        manifest_csv=FIXTURE / "labels.csv",
+        storm_split_csv=FIXTURE / "storm_split.csv",
+        exclusions_csv=FIXTURE / "exclusions.csv",
+        frame_flags_csv=flags,
+        check_images=False,
+    )
+    original = frame.loc[frame["sample_id"] == "01JAN2018_0030_1"].iloc[0]
+    copy = frame.loc[frame["sample_id"] == "01JAN2018_0030_1_rot_180"].iloc[0]
+    assert original["on_fix"] is True
+    assert copy["on_fix"] is True
+    assert copy["distance_to_land_km"] == pytest.approx(5.0)
+    assert copy["near_land"] == "true"
+    assert copy["source_frame_id"] == "01JAN2018_0030_1.jpg"
+    blank = frame.loc[frame["sample_id"] == "01JAN2018_0600_2"].iloc[0]
+    assert blank["on_fix"] is False
+    assert blank["near_land"] == "unknown"
+    assert pd.isna(blank["distance_to_land_km"])
+    missing = frame.loc[frame["sample_id"] == "20MAY2021_0900_3"].iloc[0]
+    assert missing["on_fix"] == "unknown"
+    assert missing["near_land"] == "unknown"
+    assert pd.isna(missing["distance_to_land_km"])
+    assert missing["distance_to_land_km"] != 0
+    offshore = frame.loc[frame["sample_id"] == "15JUN2019_1200_9"].iloc[0]
+    assert offshore["near_land"] == "false"
+    assert offshore["distance_to_land_km"] == pytest.approx(40.0)
+    standard = apply_wind_standard(
+        frame.loc[frame["sample_id"].isin(["01JAN2018_0030_1", "01JAN2018_0600_2", "20MAY2021_0900_3"])].reset_index(drop=True),
+        factor=0.93,
+        policy="flag",
+        open_water_km=20,
+    )
+    assert standard["wind_kt_3min"].tolist() == standard["wind_kt"].tolist()
+    assert set(standard["wind_kt_scale"]) == {1.0}
+    assert standard["near_land"].tolist() == ["true", "unknown", "unknown"]
+    assert standard["wind_conversion"].tolist() == ["", "", ""]
+
+
+def test_committed_frame_flag_is_inherited_by_the_source_name() -> None:
+    flags = read_frame_flags()
+    phailin = flags.loc[flags["filename"] == "08OCT2013_0830_1.jpg"].iloc[0]
+    assert phailin["on_fix"] is True
+    assert phailin["near_land"] == "false"
+    assert phailin["distance_to_land_km"] == pytest.approx(158.91)
+    rows = pd.DataFrame(
+        {
+            "source_frame_id": [
+                "08OCT2013_0830_1.jpg",
+                "08OCT2013_0830_1.jpg",
+                "not-in-the-audit.jpg",
+            ],
+            "filename": [
+                "08OCT2013_0830_1.jpg",
+                "08OCT2013_0830_1_rot_180.jpg",
+                "not-in-the-audit.jpg",
+            ],
+        }
+    )
+    joined = attach_frame_flags(rows, flags)
+    assert joined["on_fix"].tolist() == [True, True, "unknown"]
+    assert joined["near_land"].tolist() == ["false", "false", "unknown"]
+    assert joined["distance_to_land_km"].iloc[1] == pytest.approx(158.91)
+    assert pd.isna(joined["distance_to_land_km"].iloc[2])
+    inland = flags.loc[flags["filename"] == "20MAY2020_1730_1.jpg"].iloc[0]
+    assert inland["on_fix"] is True
+    assert inland["near_land"] == "true"
+    assert inland["distance_to_land_km"] == pytest.approx(0.0)
+    held = apply_wind_standard(
+        pd.DataFrame(
+            {
+                "wind_speed_kt": [80.0],
+                "wind_kt": [80.0],
+                "wind_averaging": ["3min"],
+                "distance_to_land_km": [float(inland["distance_to_land_km"])],
+                "near_land": [inland["near_land"]],
+                "on_fix": [inland["on_fix"]],
+            }
+        ),
+        factor=0.93,
+        policy="flag",
+        open_water_km=20,
+    )
+    assert held["wind_kt_3min"].iloc[0] == pytest.approx(80.0)
+    assert held["near_land"].iloc[0] == "true"
+    assert held["wind_conversion"].iloc[0] == ""
 
 
 def test_drop_qc_flags_removes_an_otherwise_kept_row(tmp_path: Path) -> None:
