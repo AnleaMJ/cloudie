@@ -31,6 +31,7 @@ class NormStats:
 PIXEL_KIND = {
     "nasa": "uint8",
     "tcir": "brightness_temperature_k",
+    "incyde": "jpeg_uncalibrated",
     "smoke": "synthetic",
 }
 
@@ -202,6 +203,49 @@ def leave_unflipped(image: np.ndarray, hemisphere: str | None = None) -> np.ndar
     """
     del hemisphere
     return np.asarray(image)
+
+
+def rotate_with_circular_mask(image: np.ndarray, angle_deg: float) -> np.ndarray:
+    """Rotate about the centre and drop pixels outside the inscribed circle.
+
+    There is no flip. A square rotation otherwise paints the corners from
+    empty space, and those bars must not enter training. The disk of
+    diameter equal to the short side stays inside the original chip for
+    any angle, so the kept pixels are source pixels. Outside the disk the
+    values are NaN. ``prepare_image`` then fills them from the finite disk.
+    """
+    array = np.asarray(image, dtype=np.float32)
+    channel_first = False
+    if array.ndim == 3 and array.shape[0] == 1:
+        plane = array[0]
+        channel_first = True
+    elif array.ndim == 2:
+        plane = array
+    else:
+        raise ValueError(f"circular rotation expects one plane, got {array.shape}")
+    finite = np.isfinite(plane)
+    filled = plane.copy()
+    filled[~finite] = 0.0
+    picture = Image.fromarray(filled, mode="F")
+    rotated = np.asarray(
+        picture.rotate(
+            float(angle_deg),
+            resample=Image.Resampling.BILINEAR,
+            fillcolor=0.0,
+        ),
+        dtype=np.float32,
+    )
+    height, width = rotated.shape
+    yy, xx = np.ogrid[:height, :width]
+    center_y = (height - 1) / 2.0
+    center_x = (width - 1) / 2.0
+    radius = min(height, width) / 2.0
+    disk = (yy - center_y) ** 2 + (xx - center_x) ** 2 <= radius**2
+    out = rotated.copy()
+    out[~disk] = np.nan
+    if channel_first:
+        return out[None, ...]
+    return out
 
 
 def augment_image(image: np.ndarray, split: str, rng: np.random.Generator) -> np.ndarray:

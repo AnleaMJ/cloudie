@@ -85,15 +85,20 @@ when the train split has no size labels.
   Classical features stay at native resolution. NASA TorchGeo chips are
   366×366. The smoke config may use a small square.
 - Do not present Monte Carlo dropout std as a calibrated forecast interval.
-- `data.wind_averaging` is `1min` for NASA HURDAT2 labels. The 17/34/48/64/91
-  kt bins are the project's own grouping. IMD uses 3-minute winds.
+- `data.wind_averaging` is `1min` for NASA HURDAT2 and TCIR labels, and
+  `3min` for INCYDE. The training target is `labels.label_column`
+  (`wind_kt_3min`). `labels.wind_1min_to_3min` (0.93) scales 1-minute
+  labels. The 17/34/48/64/91 kt bins are the project's own grouping.
+  IMD uses 3-minute winds, and INCYDE `imd_class` uses that scale.
 - Do not apply the project class names unless `wind_averaging` is a single
   recorded period. The column is required (`1-min`, `3-min`, `10-min`, or
   another single label such as `synthetic`). Mixed periods fail closed.
 - The 17/34/48/64/91 kt bins are the project's grouping, not official IMD
   classes. `imd5_class` stores that group. `src/evaluate.py` calls this
   grouping "our own grouping, IMD-style names" and always reports VSCS and
-  ESCS/SuCS. It records `wind_averaging` and does not convert periods.
+  ESCS/SuCS. It records `wind_averaging`. The baseline table does not
+  convert periods. `src.train` trains on `wind_kt_3min` and keeps the raw
+  label beside it.
 - `src.evaluate.intensity_class_evaluation` scores regression predictions
   on the validation split only and refuses test rows. `src.baselines` writes
   that table to `per_class_metrics.csv`. Intervals are 95% storm-id bootstrap

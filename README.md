@@ -67,7 +67,8 @@ reuse the train-storm fits in `src/baselines.py`. Persistence is a reference
 baseline: the previous frame's best-track label, not the imagery. Image-only
 models cannot be compared against it. `wind_averaging` is copied onto the report, for
 example `1min` for NASA 1-minute HURDAT2 winds. IMD definitions use 3-minute
-winds, and the report does not convert between those periods. Residual-quantile
+winds. This report does not convert between those periods. `src.train` trains
+on `wind_kt_3min` and records the raw label beside it. Residual-quantile
 widths are fit on validation storms. Monte Carlo dropout coverage reads a
 sample array and does not import torch. A coverage gap larger than the
 tolerance is labeled `uncalibrated`. Files under `reports/` are software

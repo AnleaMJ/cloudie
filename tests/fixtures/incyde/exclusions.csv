@@ -1,0 +1,4 @@
+filename,qc_flag,default_exclude
+10SEP2017_0530_1.jpg,wrong_date_imd_daymonth_swap,true
+10SEP2017_0530_1_rot_180.jpg,wrong_date_imd_daymonth_swap,true
+02FEB2018_1100_5.jpg,label_ne_imd_interp,false
