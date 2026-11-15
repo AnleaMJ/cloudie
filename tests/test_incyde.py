@@ -338,6 +338,94 @@ def test_mismatch_flag_follows_the_label_column() -> None:
     assert averaging_mismatch({"synthetic"}, {"synthetic"}, None, "wind_kt_3min") is False
 
 
+def test_raw_target_does_not_divide_raw_metrics_by_the_factor(tmp_path: Path) -> None:
+    from src.train import _path_records
+
+    frame = pd.DataFrame(
+        {
+            "split": ["val", "val"],
+            "image_path": ["a.npy", "b.npy"],
+            "_class": ["CS", "CS"],
+            "wind_speed_kt": [100.0, 80.0],
+            "wind_kt": [100.0, 80.0],
+            "wind_kt_3min": [93.0, 74.4],
+            "wind_kt_scale": [0.93, 0.93],
+        }
+    )
+    raw = _path_records(frame, tmp_path / "manifest.csv", "val", "wind_speed_kt")
+    assert [row["scale"] for row in raw] == [1.0, 1.0]
+    assert [row["wind"] for row in raw] == [100.0, 80.0]
+    back = back_converted_prediction(
+        np.array([row["wind"] for row in raw]),
+        np.array([row["scale"] for row in raw]),
+    )
+    assert back.tolist() == pytest.approx([100.0, 80.0])
+    converted = _path_records(frame, tmp_path / "manifest.csv", "val", "wind_kt_3min")
+    assert [row["scale"] for row in converted] == pytest.approx([0.93, 0.93])
+    assert back_converted_prediction(
+        np.array([93.0, 74.4]), np.array([row["scale"] for row in converted])
+    ).tolist() == pytest.approx([100.0, 80.0])
+
+
+def test_grey_jpeg_and_wide_chip_survive_the_circular_mask() -> None:
+    from src.preprocessing import prepare_training_chip
+
+    rgb = np.zeros((16, 16, 3), dtype=np.float32)
+    rgb[..., 0] = rgb[..., 1] = rgb[..., 2]
+    rgb[:, 8:] = 10.0
+    rgb[0, 0] = 255.0
+    rotated = rotate_with_circular_mask(rgb, 12.0)
+    assert rotated.ndim == 2
+    assert np.isnan(rotated[0, 0])
+    assert np.isfinite(rotated[8, 8])
+    colour = rgb.copy()
+    colour[..., 2] = 1.0
+    with pytest.raises(ValueError, match="grey IR"):
+        rotate_with_circular_mask(colour, 0.0)
+    wide = np.full((8, 64, 3), 40.0, dtype=np.float32)
+    chip = prepare_training_chip(wide, 16, 25.0, None, 0.30)
+    assert chip.shape == (1, 16, 16)
+    assert np.isfinite(chip).all()
+
+
+def test_mixed_rectangles_are_not_one_native_size() -> None:
+    from src.train import refuse_mixed_resolution
+
+    frame = pd.DataFrame(
+        {
+            "orig_size": [-1, -1],
+            "native_height": [10, 12],
+            "native_width": [40, 18],
+            "storm_id": ["a", "b"],
+        }
+    )
+    with pytest.raises(ValueError, match="mix native sizes"):
+        refuse_mixed_resolution(frame, "incyde", None)
+    refuse_mixed_resolution(frame, "incyde", 16)
+
+
+def test_audit_manifest_without_sequence_uses_the_storm_table(tmp_path: Path) -> None:
+    name = "01JAN2018_0030_1.jpg"
+    Image.fromarray(np.full((16, 16), 40, dtype=np.uint8), mode="L").save(tmp_path / name, format="PNG")
+    manifest = tmp_path / "audit.csv"
+    pd.DataFrame(
+        {
+            "storm_id": ["INCYDE-S01_IMD-2018-001"],
+            "label_kt": [40],
+            "file": [name],
+        }
+    ).to_csv(manifest, index=False)
+    frame, _dropped = read_rows(
+        tmp_path,
+        manifest_csv=manifest,
+        storm_split_csv=FIXTURE / "storm_split.csv",
+        exclusions_csv=FIXTURE / "exclusions.csv",
+        check_images=True,
+    )
+    assert int(frame["incyde_sequence"].iloc[0]) == 1
+    assert frame["storm_id"].iloc[0] == "INCYDE-S01_IMD-2018-001"
+
+
 def test_rotation_mask_drops_corners_and_does_not_flip() -> None:
     image = np.zeros((16, 16), dtype=np.float32)
     image[:, 8:] = 10.0

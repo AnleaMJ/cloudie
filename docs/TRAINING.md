@@ -247,8 +247,11 @@ from val and test. `flip_h` and `flip_v` are dropped because a mirror
 reverses cyclone spin. `rot_90` and `rot_270` are dropped because they
 add black bars. Training then applies its own rotation on INCYDE train
 rows only, with a circular mask so corner fill does not enter the loss.
-There is no flip in that augmentation. The mask leaves about a fifth of
-the square as missing, under `data.max_missing_fraction` (0.30).
+There is no flip in that augmentation. The source image is checked for
+real dropouts and resized to `data.image_size` first. The mask is then
+the inscribed circle of that square, about a fifth of the pixels, and
+those pixels are the normalized mean rather than a black bar. A grey
+JPEG stored as three identical channels is read as one plane.
 
 Normalization is per dataset, on INCYDE train storms, original frames
 only, finite pixels only, stored under `norm_by_dataset` key `incyde`.

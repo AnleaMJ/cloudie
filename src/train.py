@@ -48,7 +48,7 @@ from src.preprocessing import (
     fit_norm_stats,
     norm_by_dataset,
     prepare_image,
-    rotate_with_circular_mask,
+    prepare_training_chip,
     stack_prepared,
 )
 from src.schema import (
@@ -363,9 +363,9 @@ class PathFrames:
             stats = NormStats(mean=self.mean, std=self.std, source_split="train")
         image = load_image(row["path"])
         angle = row.get("angle")
-        if angle is not None and not pd.isna(angle):
-            image = rotate_with_circular_mask(image, float(angle))
-        image = prepare_image(image, self.image_size, stats, self.max_missing)
+        if angle is not None and pd.isna(angle):
+            angle = None
+        image = prepare_training_chip(image, self.image_size, angle, stats, self.max_missing)
         label = row["label"]
         class_index = self._index.get(label, -1) if label is not None else -1
         return (
@@ -801,9 +801,19 @@ def refuse_mixed_resolution(
             for height, width in zip(frame["native_height"], frame["native_width"], strict=True)
         }
     if dataset == "incyde":
-        if len(sizes) > 1 and image_size is None:
+        if {"native_height", "native_width"} <= set(frame.columns):
+            shapes = {
+                (int(height), int(width))
+                for height, width in zip(
+                    frame["native_height"], frame["native_width"], strict=True
+                )
+            }
+        else:
+            shapes = {(int(value), int(value)) for value in sizes}
+        if len(shapes) > 1 and image_size is None:
             raise ValueError(
-                "INCYDE frames mix native sizes and data.image_size is native. "
+                "INCYDE frames mix native sizes "
+                f"{sorted(shapes)} and data.image_size is native. "
                 "Set a square image_size so corner bars are not a second grid."
             )
         return
@@ -1401,7 +1411,9 @@ def _path_records(
     paths = [str(resolve_image(manifest, path)) for path in rows["image_path"].tolist()]
     winds = rows[wind_column].to_numpy(dtype=np.float64)
     raw = rows["wind_speed_kt"].to_numpy(dtype=np.float64)
-    if "wind_kt_scale" in rows.columns:
+    # wind_kt_scale maps a 3-minute prediction back to the raw label.
+    # A run forced onto the raw column already predicts in raw knots.
+    if wind_column == "wind_kt_3min" and "wind_kt_scale" in rows.columns:
         scale = rows["wind_kt_scale"].to_numpy(dtype=np.float64)
     else:
         scale = np.ones(len(rows), dtype=np.float64)

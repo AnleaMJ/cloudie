@@ -329,6 +329,7 @@ def read_rows(
     by_sequence = storms.set_index("Sequence")
     by_storm = storms.drop_duplicates("storm_id").set_index("storm_id")
     storm_ids: list[str] = []
+    sequences: list[int] = []
     proposed: list[str] = []
     groups: list[int] = []
     names: list[str] = []
@@ -343,15 +344,18 @@ def read_rows(
             raise ValueError(f"no storm_split row for sequence {sequence!r} storm {given!r}")
         if isinstance(row, pd.DataFrame):
             raise ValueError(f"storm_split matched more than one row for sequence {sequence}")
-        storm_id = str(row["storm_id"])
+        storm_id = str(row["storm_id"]) if "storm_id" in row.index else str(row.name)
+        sequence_id = int(row["Sequence"]) if "Sequence" in row.index else int(row.name)
         if isinstance(given, str) and given not in {"", "nan", "<NA>"} and given != storm_id:
             raise ValueError(f"manifest storm_id {given} does not match storm_split.csv ({storm_id})")
         storm_ids.append(storm_id)
+        sequences.append(sequence_id)
         proposed.append(str(row["proposed_split"]))
         groups.append(int(row["cooccurrence_group"]))
         names.append("" if "name" not in row.index or pd.isna(row["name"]) else str(row["name"]))
         basins.append("" if "basin" not in row.index or pd.isna(row["basin"]) else str(row["basin"]))
     work["storm_id"] = storm_ids
+    work["sequence"] = sequences
     work["proposed_split"] = proposed
     work["cooccurrence_group"] = groups
     work["name"] = names

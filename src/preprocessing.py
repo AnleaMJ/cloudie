@@ -205,6 +205,40 @@ def leave_unflipped(image: np.ndarray, hemisphere: str | None = None) -> np.ndar
     return np.asarray(image)
 
 
+def as_grey_plane(image: np.ndarray) -> np.ndarray:
+    """One plane. Identical RGB channels collapse. Differing channels raise.
+
+    PIL JPEGs are often ``(H, W, C)`` even when every channel is the same
+    grey IR value. A leading singleton channel is accepted too.
+    """
+    array = np.asarray(image, dtype=np.float32)
+    if array.ndim == 2:
+        return array
+    if array.ndim != 3:
+        raise ValueError(f"expected one grey plane, got {array.shape}")
+    channel_last = (
+        array.shape[-1] <= 4
+        and array.shape[0] > array.shape[-1]
+        and array.shape[1] > array.shape[-1]
+    )
+    channel_first = (
+        array.shape[0] <= 4
+        and array.shape[1] > array.shape[0]
+        and array.shape[2] > array.shape[0]
+    )
+    if channel_last:
+        count = int(array.shape[-1])
+        if count == 1 or all(np.array_equal(array[..., 0], array[..., index]) for index in range(1, count)):
+            return array[..., 0]
+        raise ValueError(f"expected grey IR, channels differ, shape {array.shape}")
+    if channel_first:
+        count = int(array.shape[0])
+        if count == 1 or all(np.array_equal(array[0], array[index]) for index in range(1, count)):
+            return array[0]
+        raise ValueError(f"expected grey IR, channels differ, shape {array.shape}")
+    raise ValueError(f"expected grey IR, got {array.shape}")
+
+
 def rotate_with_circular_mask(image: np.ndarray, angle_deg: float) -> np.ndarray:
     """Rotate about the centre and drop pixels outside the inscribed circle.
 
@@ -212,17 +246,10 @@ def rotate_with_circular_mask(image: np.ndarray, angle_deg: float) -> np.ndarray
     empty space, and those bars must not enter training. The disk of
     diameter equal to the short side stays inside the original chip for
     any angle, so the kept pixels are source pixels. Outside the disk the
-    values are NaN. ``prepare_image`` then fills them from the finite disk.
+    values are NaN. Callers that already normalized fill those NaNs with 0.
+    Channel-last grey JPEGs are accepted and returned as one plane.
     """
-    array = np.asarray(image, dtype=np.float32)
-    channel_first = False
-    if array.ndim == 3 and array.shape[0] == 1:
-        plane = array[0]
-        channel_first = True
-    elif array.ndim == 2:
-        plane = array
-    else:
-        raise ValueError(f"circular rotation expects one plane, got {array.shape}")
+    plane = as_grey_plane(image)
     finite = np.isfinite(plane)
     filled = plane.copy()
     filled[~finite] = 0.0
@@ -243,9 +270,31 @@ def rotate_with_circular_mask(image: np.ndarray, angle_deg: float) -> np.ndarray
     disk = (yy - center_y) ** 2 + (xx - center_x) ** 2 <= radius**2
     out = rotated.copy()
     out[~disk] = np.nan
-    if channel_first:
-        return out[None, ...]
     return out
+
+
+def prepare_training_chip(
+    image: np.ndarray,
+    image_size: int | str | None,
+    angle: float | None,
+    stats: NormStats | None,
+    max_missing_fraction: float = MAX_MISSING_FRACTION,
+) -> np.ndarray:
+    """Prepare one training chip, then optionally rotate on that grid.
+
+    The missing-pixel gate sees the source image, before the circular mask.
+    A configured square resize happens first, so the mask is the inscribed
+    circle of the training grid (about a fifth of the square) and not the
+    corners of a wide native crop. Masked pixels are 0 after normalization,
+    which is the training mean, not a black bar.
+    """
+    prepared = prepare_image(as_grey_plane(image), image_size, stats, max_missing_fraction)
+    if angle is None:
+        return prepared
+    masked = rotate_with_circular_mask(prepared, float(angle))
+    if masked.ndim == 2:
+        masked = masked[None, ...]
+    return np.where(np.isfinite(masked), masked, np.float32(0.0)).astype(np.float32)
 
 
 def augment_image(image: np.ndarray, split: str, rng: np.random.Generator) -> np.ndarray:
