@@ -1,5 +1,20 @@
 # Cloudie architecture (INCYDE CPU model v0.1)
 
+## What it does
+
+The model takes one INSAT-3D/3DR infrared satellite image of a cyclone
+(an INCYDE crop) and estimates two things:
+
+1. **Maximum sustained wind** in knots (IMD 3-minute standard).
+2. **Intensity category** in this project's IMD-style bins: `D_DD`, `CS`,
+   `SCS`, `VSCS`, `ESCS_SUCS` (not official IMD classes).
+
+It is evaluated only on storms it never saw in training (storm-ID split and
+storm-grouped cross-validation). The results are validation-only research
+numbers, not an operational forecast or warning.
+
+Headline numbers: **TBD, filled in from the final run.**
+
 This page describes the stack exactly as it is in the code on branch
 `bean/incyde-cpu-model-v0.1`: `src/model.py`, `src/train.py` (`build_net`,
 `EarlyStopping`, `load_init_weights`), `scripts/incyde_cpu/*.py` and
