@@ -4,6 +4,27 @@ Every change made to train or improve the Cloudie intensity model, newest last.
 Times are IST (UTC+5:30). "Measured effect" is filled in only from real runs; "pending" means not measured yet.
 All metrics are validation / storm-grouped CV only. Nothing here is an operational claim.
 
+## Starting point: SWE's INCYDE baselines (PR #40, commit `c1ac585`)
+
+Same validation set as v0: 14 storms, 4,068 original frames, raw IMD 3-minute
+labels, test storms not scored. Same 5 CV folds (`results/incyde_baselines/cv_folds.csv`,
+74 train+val storms, seed 42, each `cooccurrence_group` in one fold).
+
+| Baseline (validation) | MAE kt | RMSE kt | Bias kt | 5-fold CV MAE |
+|---|---|---|---|---|
+| Mean predictor | 14.26 | 18.34 | +2.63 | 16.66 |
+| Random forest (lowest RMSE) | 13.08 | 18.20 | +0.64 | 14.70 |
+| SVR (lowest MAE) | 12.24 | 18.86 | −4.24 | 13.91 |
+| Persistence (previous label; reference only) | 0.18 | – | – | – |
+
+Persistence is a label-continuity artifact (about 91% of INCYDE labels are
+interpolated between best-track fixes), not an image-model target. SVR per-class
+RMSE is about 10 kt for D_DD and CS, 19 for SCS, 39 for VSCS and 75 for
+ESCS_SUCS. Their on-fix validation subset is 339 rows. The mean predictor is a
+strong bar on RMSE. Source: PR #40 body (numbers as reported there).
+
+## Changes
+
 | # | Date & time (IST) | Change | Reason | Measured effect |
 |---|---|---|---|---|
 | 1 | 2026-11-15 23:38 IST | Opened branch `bean/incyde-cpu-model-v0.1` from main `8eff560` to train the first real Cloudie model on the shared box CPU (no GPU, no paid cloud, nothing run on Anlea's machines). Targets: max sustained wind (kt, regression) and intensity category (classification). | Anlea asked for a trained model, shipped weights and real eval. | pending |
@@ -23,3 +44,6 @@ All metrics are validation / storm-grouped CV only. Nothing here is an operation
 | 15 | 2026-11-16 00:08 IST | CV folds now follow the PR #35 rule exactly (train+val storms from `storm_split.csv`, `cooccurrence_group`s sorted, shuffled with `numpy.random.default_rng(42)`, dealt round-robin into 5 folds); `--cv-folds-csv` takes SWE's `results/incyde_baselines/cv_folds.csv` verbatim once it is posted. The folds used are written to each run's `cv_folds.csv`. | Match SWE's baselines and Clara's loader. | n/a |
 | 16 | 2026-11-16 00:08 IST | Diagnosis of E0: the val MAE of 11.47 kt is close to predicting the train median (11.63 kt). At init the SimpleCNN's pooled features have a per-dimension std of only ~0.011 (PyTorch default conv init, no normalization layers), so the wind head barely sees the image. Short 3-epoch probes: lr 1e-3 Smooth L1 → MAE 11.83, MSE → RMSE 17.53, lr 3e-3 Smooth L1 → MAE 11.45. Testing Kaiming (fan_out) conv init next; architecture unchanged. | Find why the model underfits. | probe numbers above (3 epochs, val) |
 | 17 | 2026-11-16 00:26 IST | **E3 = E0 + wind-head bias set to the train mean (40.27 kt) + lr 3e-3 + cosine LR schedule over 40 epochs** (still wind-only loss, no augmentation; best epoch on val MAE kept, epoch 22). These three changes were tested together, so their separate effects are not known. Category = predicted wind binned. | E0 underfit (diagnosis in #16). | **Before (E0):** val MAE 11.47, RMSE 19.02, bias −7.37; 5-bin acc 0.574, F1 0.167. **After (E3):** val MAE 9.66, RMSE 16.05, bias −4.36; 5-bin acc 0.629, F1 0.298; IMD-7 acc 0.397, F1 0.262. Still strongly under-predicts strong storms (VSCS bias −32.4 kt, ESCS_SUCS −68.6 kt, 1 storm). |
+| 18 | 2026-11-16 00:32 IST | PR #37 (this work, opened as a draft) was marked ready and merged into main by the AnleaMJ account at 00:26 IST, while training was still in progress; it carried only scripts, docs and E0/E3 logs, no weights or final results. Work continues on a new branch `bean/incyde-v0-results` from main (which now includes #35's `src/incyde.py`, #36/#38's `frame_flags.csv` and #39). | Keep the remaining work reviewable and up to date with main. | n/a |
+| 19 | 2026-11-16 00:32 IST | CV now uses SWE's `results/incyde_baselines/cv_folds.csv` from PR #40 commit `c1ac585789f179fa9d5f6eab19788d8a489f3880` (`--cv-folds-csv`). It is identical, storm for storm, to the folds this script builds with the #35 rule (74 storms; fold sizes 15/14/15/15/15). | Line up with SWE's baselines. | n/a |
+| 20 | 2026-11-16 00:32 IST | Added the on-fix subset: `incyde/audit/frame_flags.csv` joined on filename, `on_fix == true`; augmented copies inherit their source frame's flag; `unknown` stays unknown (none in this file). 1,854 original frames overall, 339 in validation, same as SWE's subset. | Projects Manager: report on-fix alongside overall. | E3 on-fix val: MAE 12.14, RMSE 20.70, bias −7.32 (train-mean baseline on the same rows: MAE 15.96, RMSE 21.88). |
