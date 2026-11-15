@@ -54,6 +54,8 @@ incyde:
   cv_val_fold: 0
   cv_seed: 42
   cv_folds_csv: null
+  frame_flags_csv: null
+  on_fix_only_eval: false
 split:
   strategy: storm_wise
   test_fraction: 0.2
@@ -81,6 +83,8 @@ train:
   device_parity_tol: 0.05
   class_loss_weight: 0.1
   size_loss_weight: 0.1
+  loss_weighting: none
+  balanced_sampling: false
 predict:
   advisory_jump_kt: 20
   operational_disclaimer: "This is not an operational forecast."

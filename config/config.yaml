@@ -71,6 +71,11 @@ incyde:
   cv_seed: 42
   # Optional storm_id,fold file. When set, it replaces the seeded folds.
   cv_folds_csv: null
+  # null uses incyde/audit/frame_flags.csv. Unknown cells stay unknown.
+  frame_flags_csv: null
+  # When true, also report validation metrics on explicit on_fix frames.
+  # The overall validation metrics stay the full validation split.
+  on_fix_only_eval: false
 split:
   strategy: storm_wise
   test_fraction: 0.2
@@ -102,6 +107,12 @@ train:
   class_loss_weight: 0.1
   # Applied only when r34_nmi and rmw_nmi exist on the train split.
   size_loss_weight: 0.1
+  # none leaves Smooth L1 unweighted. The other modes reweight the five
+  # project bins on the 3-minute target, using train originals only.
+  loss_weighting: none
+  # Draw train rows with inverse-frequency weights so each occurring bin
+  # has the same expected count. Off by default.
+  balanced_sampling: false
 predict:
   # Review flag, not a warning threshold.
   advisory_jump_kt: 20

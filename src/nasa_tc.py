@@ -34,6 +34,11 @@ Call them pixel stats until a calibration table exists.
 Labels are HURDAT2 best-track maximum sustained winds in knots. HURDAT2 uses
 1-minute sustained winds, so ``wind_averaging`` is ``1min``.
 
+There is no distance-to-land join. ``storm_id`` is a 3-letter competition
+identifier and the only time field is ``relative_time_s``, so an IBTrACS
+match would be a guess. ``near_land`` stays unknown. See
+``nasa_tc/audit/README.md``. Do not invent a mapping.
+
 The competition's own train/test sides split frames, not storms: many test
 storms also appear in train. ``source_split`` keeps that side for reference
 only. Do not train on one side and score on the other. Use the storm-wise

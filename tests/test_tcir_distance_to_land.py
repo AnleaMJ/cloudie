@@ -9,6 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
+
+from src.labels import apply_wind_standard
+from src.tcir import attach_distance_to_land
 
 AUDIT_DIR = Path(__file__).resolve().parents[1] / "tcir" / "audit"
 FLAGS = AUDIT_DIR / "distance_to_land.csv"
@@ -70,3 +74,38 @@ def test_hand_checked_ibtracs_fixes() -> None:
         row = flags.loc[sample_id]
         assert row["distance_to_land_km"] == distance
         assert row["near_land"] == near_land
+
+
+def test_loader_applies_near_land_policy_to_a_real_distance() -> None:
+    """Flag still multiplies. Raw holds only a real near-land distance. Unknown stays unknown."""
+    flags = _load().set_index("sample_id")
+    near_id = "tcir_200303L_2003062806"  # DIST2LAND 0
+    far_id = "tcir_200301L_2003041800"  # DIST2LAND 1116
+    unknown_id = "tcir_201011E_2010090418"
+    assert flags.loc[near_id, "near_land"] == "true"
+    assert float(flags.loc[near_id, "distance_to_land_km"]) <= 20
+    assert flags.loc[far_id, "near_land"] == "false"
+    assert float(flags.loc[far_id, "distance_to_land_km"]) > 20
+    assert flags.loc[unknown_id, "near_land"] == "unknown"
+    assert flags.loc[unknown_id, "distance_to_land_km"] == ""
+    frame = pd.DataFrame(
+        {
+            "sample_id": [near_id, far_id, unknown_id, "tcir_not_in_the_audit"],
+            "wind_speed_kt": [100.0, 100.0, 100.0, 100.0],
+            "wind_averaging": ["1min", "1min", "1min", "1min"],
+        }
+    )
+    joined = attach_distance_to_land(frame)
+    assert joined["distance_to_land_km"].iloc[0] == pytest.approx(0.0)
+    assert joined["distance_to_land_km"].iloc[1] == pytest.approx(1116.0)
+    assert pd.isna(joined["distance_to_land_km"].iloc[2])
+    assert pd.isna(joined["distance_to_land_km"].iloc[3])
+    assert joined["near_land"].tolist() == ["true", "false", "unknown", "unknown"]
+    flagged = apply_wind_standard(joined, factor=0.93, policy="flag", open_water_km=20)
+    assert flagged["wind_kt_3min"].tolist() == pytest.approx([93.0, 93.0, 93.0, 93.0])
+    assert flagged["wind_speed_kt"].tolist() == [100.0, 100.0, 100.0, 100.0]
+    assert flagged["conversion_exposure_flag"].tolist() == ["true", "false", "unknown", "unknown"]
+    held = apply_wind_standard(joined, factor=0.93, policy="raw", open_water_km=20)
+    assert held["wind_kt_3min"].tolist() == pytest.approx([100.0, 93.0, 93.0, 93.0])
+    assert held["conversion_exposure_flag"].tolist() == ["true", "false", "unknown", "unknown"]
+    assert "held raw" in held["wind_conversion"].iloc[0]

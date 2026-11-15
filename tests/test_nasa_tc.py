@@ -44,6 +44,10 @@ def test_manifest_schema_and_native_size(tmp_path: Path) -> None:
     assert not frame["is_synthetic"].any()
     assert set(frame["wind_averaging"]) == {"1min"}
     assert set(frame["native_height"]) == {366}
+    assert "distance_to_land_km" not in frame.columns
+    assert "near_land" not in frame.columns
+    source = Path(__file__).resolve().parents[1].joinpath("src", "nasa_tc.py").read_text(encoding="utf-8")
+    assert "nasa_tc/audit/README.md" in source
     assert frame["grey_ir"].all()
     summary = summarize(frame)
     assert summary["rows"] == 5

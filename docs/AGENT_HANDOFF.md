@@ -75,6 +75,14 @@ when the train split has no size labels.
   Smoke data is synthetic. `quote_as_result` stays `no`.
 - Do not describe the repo as operational.
 - Do not fill ADT, SATCON, or Dvorak columns unless those outputs are joined.
+- INCYDE `on_fix`, `distance_to_land_km`, and `near_land` come from
+  `incyde/audit/frame_flags.csv` (source filename; copies inherit). Unknown
+  stays unknown. TCIR distances come from `tcir/audit/distance_to_land.csv`
+  on `sample_id`. NASA has no join key; leave `near_land` unknown and read
+  `nasa_tc/audit/README.md`. Do not invent a storm or time mapping.
+- `train.loss_weighting` defaults to `none`. `train.balanced_sampling`
+  defaults to false. Bin counts use original train rows only, after the
+  storm split or `storm_cv` fold is assigned. Never count val or test.
 - The simplified DAV feature is not operational DAV. Do not rename it as if
   it were.
 - Do not silently flip Southern Hemisphere images.

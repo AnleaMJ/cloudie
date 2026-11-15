@@ -26,6 +26,8 @@ REQUIRED = {
         "cv_val_fold",
         "cv_seed",
         "cv_folds_csv",
+        "frame_flags_csv",
+        "on_fix_only_eval",
     ],
     "data": [
         "image_size",
@@ -57,6 +59,8 @@ REQUIRED = {
         "grad_accum_steps",
         "num_workers",
         "device_parity_tol",
+        "loss_weighting",
+        "balanced_sampling",
     ],
     "predict": ["advisory_jump_kt"],
     "features": [

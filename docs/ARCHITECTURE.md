@@ -151,6 +151,10 @@ flowchart LR
 - A second pretraining run uses the raw 1-minute labels so the effect of the
   conversion can be measured.
 - **NASA TC imagery is not on the box,** so NASA is not used in v0.1.
+- The `src.train` path is separate from this script. It joins
+  `incyde/audit/frame_flags.csv` and `tcir/audit/distance_to_land.csv`.
+  NASA stays `near_land` unknown because that loader has no IBTrACS key
+  (`nasa_tc/audit/README.md`). Details are in `docs/TRAINING.md`.
 
 ## 5. Training setup
 

@@ -127,6 +127,204 @@ def class_sample_weights(
     return sample, class_weight
 
 
+LOSS_WEIGHTINGS = ("none", "inverse_freq", "sqrt_inverse_freq")
+
+
+def loss_weighting_mode(value: object) -> str:
+    """``train.loss_weighting``. The default ``none`` leaves the wind loss unweighted."""
+    if value is None or (isinstance(value, str) and value.strip().lower() in {"", "null", "none"}):
+        return "none"
+    text = str(value).strip().lower()
+    if text not in LOSS_WEIGHTINGS:
+        raise ValueError("train.loss_weighting must be none, inverse_freq, or sqrt_inverse_freq")
+    return text
+
+
+def config_flag(value: object, name: str) -> bool:
+    """YAML bool. Strings ``true`` and ``false`` are accepted. Anything else raises."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return False
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "t"}:
+        return True
+    if text in {"0", "false", "no", "n", "f"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
+def frequency_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """Rows that define intensity-bin frequencies.
+
+    Only the assigned train split is used. Synthetic copies are excluded
+    when that split also has original frames, so a ``rot_180`` duplicate
+    cannot change the weight. Val and test never contribute, including
+    under ``storm_cv`` (the val fold is already ``split == val``). A train
+    split whose every row is synthetic, which is the smoke manifest, uses
+    those rows because there is no original frame to count.
+    """
+    if "split" not in frame.columns:
+        raise LeakageError("intensity weights need an assigned split")
+    train = frame.loc[frame["split"].astype(str) == "train"].copy()
+    if train.empty:
+        raise LeakageError("intensity weights need train rows")
+    note = "train originals; synthetic copies, val, and test are excluded"
+    if "is_synthetic" not in train.columns:
+        return train.reset_index(drop=True), note
+    flags = [parse_is_synthetic(value) for value in train["is_synthetic"].tolist()]
+    originals = train.loc[[not flag for flag in flags]]
+    if originals.empty:
+        return (
+            train.reset_index(drop=True),
+            "train rows; every train row is synthetic, so no original frame was excluded",
+        )
+    return originals.reset_index(drop=True), note
+
+
+def _bin_weight_table(counts: dict[str, int], mode: str) -> dict[str, float | None]:
+    """Per-bin weight. A bin with no train originals stays null.
+
+    ``inverse_freq`` is ``n / (k * count)`` over bins that occur, the same
+    shape as the class weights above, so the count-weighted mean is 1.
+    ``sqrt_inverse_freq`` is the square root of that weight. ``none`` is 1
+    on bins that occur and is not applied to the loss.
+    """
+    choice = loss_weighting_mode(mode)
+    present = {name: int(count) for name, count in counts.items() if int(count) > 0}
+    total = float(sum(present.values()))
+    n_present = len(present)
+    weights: dict[str, float | None] = {}
+    for name, count in counts.items():
+        count = int(count)
+        if count <= 0:
+            weights[name] = None
+            continue
+        if choice == "none":
+            weights[name] = 1.0
+            continue
+        base = total / (n_present * float(count))
+        if choice == "inverse_freq":
+            weights[name] = float(base)
+        else:
+            weights[name] = float(np.sqrt(base))
+    return weights
+
+
+def intensity_balance(frame: pd.DataFrame, config: dict, wind_column: str) -> dict:
+    """Train-only bin counts and the weights the run will record.
+
+    Sampling, when enabled, draws with the inverse-frequency weights so
+    each occurring bin has the same expected count. That table is separate
+    from ``sqrt_inverse_freq`` loss weights.
+    """
+    train_cfg = config.get("train") if isinstance(config.get("train"), dict) else {}
+    mode = loss_weighting_mode(train_cfg.get("loss_weighting", "none"))
+    balanced = config_flag(train_cfg.get("balanced_sampling", False), "train.balanced_sampling")
+    rows, note = frequency_rows(frame)
+    names = [str(name) for name in config["data"]["imd5_names"]]
+    labels = project_labels(rows, config, wind_column)
+    counts = {name: 0 for name in names}
+    for label in labels:
+        if label in counts:
+            counts[label] += 1
+    return {
+        "loss_weighting": mode,
+        "balanced_sampling": balanced,
+        "source": note,
+        "split_strategy": str((config.get("split") or {}).get("strategy", "")),
+        "wind_column": str(wind_column),
+        "n_frequency_rows": int(len(rows)),
+        "n_below_lowest_edge": int(sum(label not in counts for label in labels)),
+        "counts": counts,
+        "weights": _bin_weight_table(counts, mode),
+        "sampling_weights": _bin_weight_table(counts, "inverse_freq") if balanced else None,
+    }
+
+
+def align_bin_weights(
+    labels: list, table: dict[str, float | None] | None, *, neutral: float = 1.0
+) -> np.ndarray:
+    """One weight per row. A missing bin, or a row below 17 kt, stays neutral."""
+    if table is None:
+        return np.ones(len(labels), dtype=np.float64)
+    out = np.empty(len(labels), dtype=np.float64)
+    for index, label in enumerate(labels):
+        weight = None if label is None else table.get(str(label))
+        out[index] = float(neutral if weight is None else weight)
+    return out
+
+
+def annotate_balance(frame: pd.DataFrame, balance: dict, config: dict) -> pd.DataFrame:
+    """Record the project bin and the loss weight on every row.
+
+    Val and test stay at weight 1. They are not in the frequency table.
+    ``none`` writes 1 on every row and the training loop does not weight
+    the loss.
+    """
+    out = frame.copy()
+    labels = project_labels(out, config, str(balance["wind_column"]))
+    out["intensity_bin"] = ["" if label is None else str(label) for label in labels]
+    if balance["loss_weighting"] == "none":
+        out["loss_weight"] = np.ones(len(out), dtype=np.float64)
+        return out
+    weights = align_bin_weights(labels, balance["weights"])
+    train = out["split"].astype(str).eq("train").to_numpy()
+    applied = np.ones(len(out), dtype=np.float64)
+    applied[train] = weights[train]
+    out["loss_weight"] = applied
+    return out
+
+
+def balance_record(balance: dict) -> dict:
+    """JSON-safe copy of the weight table for the run manifest."""
+
+    def _weights(table: dict | None) -> dict | None:
+        if table is None:
+            return None
+        return {str(name): None if value is None else float(value) for name, value in table.items()}
+
+    return {
+        "loss_weighting": balance["loss_weighting"],
+        "balanced_sampling": bool(balance["balanced_sampling"]),
+        "source": balance["source"],
+        "split_strategy": balance["split_strategy"],
+        "wind_column": balance["wind_column"],
+        "n_frequency_rows": int(balance["n_frequency_rows"]),
+        "n_below_lowest_edge": int(balance["n_below_lowest_edge"]),
+        "counts": {str(name): int(count) for name, count in balance["counts"].items()},
+        "weights": _weights(balance["weights"]),
+        "sampling_weights": _weights(balance["sampling_weights"]),
+    }
+
+
+def is_on_fix(value: object) -> bool:
+    """True only when the flag is explicitly true. Unknown is not on-fix."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if value is None or value is pd.NA:
+        return False
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        missing = False
+    if isinstance(missing, (bool, np.bool_)) and bool(missing):
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "t"}
+
+
+def on_fix_metrics(
+    truth: np.ndarray, pred: np.ndarray, flags, config: dict
+) -> dict:
+    """Validation metrics on explicit on-fix rows. Unknown rows stay out."""
+    mask = np.asarray([is_on_fix(value) for value in list(flags)], dtype=bool)
+    truth_arr = np.asarray(truth, dtype=np.float64).reshape(-1)
+    pred_arr = np.asarray(pred, dtype=np.float64).reshape(-1)
+    if mask.shape[0] != truth_arr.shape[0] or pred_arr.shape[0] != truth_arr.shape[0]:
+        raise ValueError("on_fix flags must align with the validation rows")
+    return _score_split(truth_arr[mask], pred_arr[mask], config)
+
+
 def project_labels(
     frame: pd.DataFrame, config: dict, wind_column: str = "wind_speed_kt"
 ) -> list[str | None]:
@@ -276,27 +474,58 @@ def _torch():
     return torch
 
 
-def build_loader(dataset, *, batch_size: int, shuffle: bool, num_workers: int, generator=None):
+def build_loader(
+    dataset, *, batch_size: int, shuffle: bool, num_workers: int, generator=None, sampler=None
+):
     """DataLoader with ``persistent_workers`` whenever workers are used.
 
     ``num_workers`` comes from ``train.num_workers``. Zero workers load in
-    the parent process and do not set ``persistent_workers``.
+    the parent process and do not set ``persistent_workers``. A balanced
+    sampler replaces shuffle. The sampler carries its own generator.
     """
     from torch.utils.data import DataLoader
 
     workers = int(num_workers)
     if workers < 0:
         raise ValueError("train.num_workers must be >= 0")
+    if sampler is not None and shuffle:
+        raise ValueError("balanced sampling does not also shuffle the loader")
     kwargs = {
         "batch_size": int(batch_size),
-        "shuffle": bool(shuffle),
+        "shuffle": bool(shuffle) if sampler is None else False,
         "num_workers": workers,
     }
-    if generator is not None:
+    if sampler is not None:
+        kwargs["sampler"] = sampler
+    elif generator is not None:
         kwargs["generator"] = generator
     if workers > 0:
         kwargs["persistent_workers"] = True
     return DataLoader(dataset, **kwargs)
+
+
+def make_balanced_sampler(weights: np.ndarray, num_samples: int, seed: int):
+    """Draw with replacement so every positive-weight bin can appear.
+
+    ``num_samples`` is one epoch. Weights are the inverse-frequency table
+    from the train originals. A zero-sum table is refused.
+    """
+    torch = _torch()
+    from torch.utils.data import WeightedRandomSampler
+
+    values = np.asarray(weights, dtype=np.float64).reshape(-1)
+    if values.size == 0 or not np.isfinite(values).all() or np.any(values < 0):
+        raise ValueError("balanced sampling weights must be finite and non-negative")
+    if float(values.sum()) <= 0:
+        raise ValueError("balanced sampling weights must have a positive sum")
+    generator = torch.Generator()
+    generator.manual_seed(int(seed))
+    return WeightedRandomSampler(
+        weights=torch.as_tensor(values, dtype=torch.double),
+        num_samples=int(num_samples),
+        replacement=True,
+        generator=generator,
+    )
 
 
 class ArrayFrames:
@@ -461,6 +690,22 @@ def _wind_loss(prediction, target, sample_weight):
     if sample_weight is None:
         return per_row.mean()
     weight = sample_weight.view(-1)
+    return (per_row * weight).sum() / weight.sum().clamp_min(1e-8)
+
+
+def batch_wind_loss(prediction, target, sample_weight, loss_weighting: str):
+    """Smooth L1 for one batch.
+
+    ``none`` is the unweighted mean, including when the rows carry a
+    weight column. Other modes use that column. The mean of the weighted
+    terms is divided by the weight sum, not by the row count.
+    """
+    import torch.nn.functional as F
+
+    per_row = F.smooth_l1_loss(prediction.reshape(-1), target.reshape(-1), reduction="none")
+    if loss_weighting_mode(loss_weighting) == "none" or sample_weight is None:
+        return per_row.mean()
+    weight = sample_weight.reshape(-1)
     return (per_row * weight).sum() / weight.sum().clamp_min(1e-8)
 
 
@@ -859,6 +1104,8 @@ def load_nasa_frame(config: dict) -> tuple[pd.DataFrame, int]:
 
     Phase 1 keeps ``orig_size`` 366 only. Colour frames and any other size
     are excluded, and the excluded count is logged. Nothing is downloaded.
+    NASA has no IBTrACS join key, so ``near_land`` stays unknown. See
+    ``nasa_tc/audit/README.md``.
     """
     from src.nasa_tc import WORKING_SIZE, build_manifest, csv_tables, exclusions_for, split_exclusions
     from src.schema import require_valid
@@ -925,8 +1172,9 @@ def load_incyde_frame(config: dict) -> tuple[pd.DataFrame, int]:
     """INCYDE manifest from a local extract. The audit CSVs name the split.
 
     ``rot_180`` copies stay on the source storm and in train only. Nothing
-    is downloaded. ``on_fix`` is omitted because the audit files do not
-    record it.
+    is downloaded. ``on_fix``, ``distance_to_land_km``, and ``near_land``
+    come from ``incyde/audit/frame_flags.csv``. Unknown audit cells stay
+    unknown. The 3-minute label is not rescaled.
     """
     from src.incyde import load_frame
 
@@ -1115,16 +1363,18 @@ def _fit_run(
     optimizer_state: dict | None = None,
     on_epoch_end=None,
     already_stopped: bool = False,
+    loss_weighting: str = "none",
 ):
     """Smooth L1 on wind, AdamW, early stopping on validation MAE.
 
     Gradient accumulation steps come from ``train.grad_accum_steps``.
     CUDA fp16 uses GradScaler. XPU bf16 and CPU fp32 do not. A checkpoint
     callback runs after every finished epoch so a sleep can resume there.
+    ``loss_weighting`` ``none`` keeps the unweighted mean.
     """
     torch = _torch()
-    import torch.nn.functional as F
 
+    weighting = loss_weighting_mode(loss_weighting)
     policy = amp_policy_for(device)
     accum = int(train_cfg["grad_accum_steps"])
     if accum < 1:
@@ -1158,10 +1408,10 @@ def _fit_run(
         for batch in train_loader:
             if max_steps is not None and steps >= int(max_steps):
                 break
-            images, winds, _class_index, _sample_weight, _size = _move_batch(batch, device)
+            images, winds, _class_index, sample_weight, _size = _move_batch(batch, device)
             with autocast_context(policy):
                 wind_hat, _logits, _size_hat = _split_output(model(images))
-                loss = F.smooth_l1_loss(wind_hat.float().view(-1), winds.float().view(-1))
+                loss = batch_wind_loss(wind_hat.float(), winds.float(), sample_weight, weighting)
             if scaler is None:
                 (loss / accum).backward()
             else:
@@ -1403,6 +1653,7 @@ def _path_records(
     split_name: str,
     wind_column: str,
     angles: np.ndarray | None = None,
+    weights: np.ndarray | None = None,
 ) -> list[dict]:
     rows = frame[frame["split"] == split_name].reset_index(drop=True)
     if rows.empty:
@@ -1417,6 +1668,16 @@ def _path_records(
         scale = rows["wind_kt_scale"].to_numpy(dtype=np.float64)
     else:
         scale = np.ones(len(rows), dtype=np.float64)
+    if weights is None:
+        row_weights = np.ones(len(rows), dtype=np.float64)
+    else:
+        row_weights = np.asarray(weights, dtype=np.float64).reshape(-1)
+        if row_weights.shape[0] != len(rows):
+            raise ValueError("loss weights must align with the split")
+    if "on_fix" in rows.columns:
+        on_fix_values = rows["on_fix"].tolist()
+    else:
+        on_fix_values = [None] * len(rows)
     records = []
     for index in range(len(rows)):
         angle = None if angles is None else float(angles[index])
@@ -1427,7 +1688,8 @@ def _path_records(
                 "raw_wind": float(raw[index]),
                 "scale": float(scale[index]),
                 "label": labels[index],
-                "weight": 1.0,
+                "weight": float(row_weights[index]),
+                "on_fix": on_fix_values[index],
                 "angle": angle,
             }
         )
@@ -1579,6 +1841,11 @@ def run_training(
         groups = storm_ids_by_split(assigned)
         if not groups["train"] or not groups["val"] or not groups["test"]:
             raise LeakageError("train, val, and test storms are all required")
+        # Frequencies are the assigned train split, so storm_cv's val fold
+        # and the sealed test storms are already out. The CSV records them.
+        assigned = annotate_balance(
+            assigned, intensity_balance(assigned, resolved, wind_column), resolved
+        )
         run_id = _run_id(dataset_name, str(resolved["model"]["name"]), digest)
         run_dir = Path(resolved["paths"]["runs"]) / run_id
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -1632,21 +1899,40 @@ def run_training(
     torch = _torch()
     generator = torch.Generator()
     generator.manual_seed(seed)
-    train_count = int((labeled["split"].astype(str) == "train").sum())
+    balance = intensity_balance(labeled, resolved, wind_column)
+    balance_payload = balance_record(balance)
+    train_rows = labeled.loc[labeled["split"] == "train"].reset_index(drop=True)
+    train_labels = [None if pd.isna(value) else str(value) for value in train_rows["_class"]]
+    if balance["loss_weighting"] == "none":
+        train_loss_weights = np.ones(len(train_rows), dtype=np.float64)
+    else:
+        train_loss_weights = align_bin_weights(train_labels, balance["weights"])
+    train_count = int(len(train_rows))
     train_records = _path_records(
         labeled,
         manifest_path,
         "train",
         wind_column,
         training_angles(train_count, seed, dataset_name == "incyde"),
+        train_loss_weights,
     )
     val_records = _path_records(labeled, manifest_path, "val", wind_column, None)
+    train_sampler = None
+    shuffle_train = True
+    if balance["balanced_sampling"]:
+        train_sampler = make_balanced_sampler(
+            align_bin_weights(train_labels, balance["sampling_weights"]),
+            len(train_rows),
+            seed,
+        )
+        shuffle_train = False
     train_loader = build_loader(
         PathFrames(train_records, image_size, stats.mean, stats.std, max_missing, known),
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=shuffle_train,
         num_workers=workers,
-        generator=generator,
+        generator=None if train_sampler is not None else generator,
+        sampler=train_sampler,
     )
     val_loader = build_loader(
         PathFrames(val_records, image_size, stats.mean, stats.std, max_missing, known),
@@ -1738,6 +2024,7 @@ def run_training(
         optimizer_state=optimizer_state,
         on_epoch_end=_on_epoch_end,
         already_stopped=already_stopped,
+        loss_weighting=balance["loss_weighting"],
     )
     if not history:
         raise RuntimeError("training produced no loss curve")
@@ -1824,6 +2111,7 @@ def run_training(
         "device_parity_output_max_abs": None if parity is None else parity["output_max_abs"],
         "device_parity_loss_max_abs": None if parity is None else parity["loss_max_abs"],
         "device_parity_tol": float(train_cfg["device_parity_tol"]),
+        "intensity_balance": balance_payload,
     }
     torch.save(payload, checkpoint)
     (run_dir / "resolved_config.yaml").write_text(
@@ -1860,6 +2148,7 @@ def run_training(
         "val_raw": _score_split(val_raw_truth, val_raw_pred, resolved),
         "test": test_metrics,
         "test_raw": test_raw_metrics,
+        "intensity_balance": balance_payload,
         "device": torch_device.type,
         "device_requested": device_name,
         "precision": policy.precision,
@@ -1875,6 +2164,21 @@ def run_training(
         "norm_by_dataset": dataset_stats,
         "note": SMOKE_BANNER if synthetic else NOT_A_FORECAST,
     }
+    on_fix_only = False
+    if dataset_name == "incyde":
+        on_fix_only = config_flag(
+            (resolved.get("incyde") or {}).get("on_fix_only_eval", False),
+            "incyde.on_fix_only_eval",
+        )
+    if on_fix_only and "on_fix" not in labeled.columns:
+        raise ValueError("incyde.on_fix_only_eval needs on_fix on the INCYDE rows")
+    metrics["on_fix_only_eval"] = bool(on_fix_only)
+    if on_fix_only:
+        # Overall val and val_raw stay the full validation split. This block
+        # is an extra slice. Unknown on_fix rows are not treated as on-fix.
+        flags = [row.get("on_fix") for row in val_records]
+        metrics["val_on_fix"] = on_fix_metrics(val_truth, val_pred, flags, resolved)
+        metrics["val_raw_on_fix"] = on_fix_metrics(val_raw_truth, val_raw_pred, flags, resolved)
     if str(resolved["split"]["strategy"]).strip().lower() == "year_holdout_2019":
         from src.incyde import YEAR_HOLDOUT_NOTE
 

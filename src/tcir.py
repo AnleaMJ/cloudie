@@ -47,6 +47,13 @@ TCIR has no official split inside these files, so the manifest has no
 ``source_split`` and never has ``split``. ``src.splits.assign_storms`` writes
 ``split`` by storm. MSLP and R35 are label-derived, so they stay out of the
 manifest.
+
+Distance to land is joined from ``tcir/audit/distance_to_land.csv`` on
+``sample_id`` (``distance_to_land_km`` and ``near_land``). The training
+path then applies ``labels.near_land_policy`` with ``labels.open_water_km``.
+A sample the CSV does not list, and a listed row whose distance is blank,
+stay unknown. The distance is not filled with 0. NASA is not in this file;
+that loader has no join key (``nasa_tc/audit/README.md``).
 """
 
 from __future__ import annotations
@@ -70,6 +77,8 @@ WIND_AVERAGING = "1min"
 IR1_VALID_RANGE = (150.0, 340.0)  # kelvin; colder or warmer than any plausible IR window value
 MAX_MISSING_FRACTION = 0.30  # same gate as src.preprocessing
 BLOCK = 256
+_DISTANCE_COLUMNS = ("sample_id", "distance_to_land_km", "near_land")
+DEFAULT_DISTANCE_CSV = Path(__file__).resolve().parents[1] / "tcir" / "audit" / "distance_to_land.csv"
 
 # data_set -> (label source, documented by TCIR)
 LABEL_SOURCES = {
@@ -191,6 +200,104 @@ def hemisphere_of(lat: pd.Series) -> pd.Series:
     return pd.Series(np.where(pd.to_numeric(lat) < 0, "S", "N"), index=lat.index)
 
 
+def _blank_distance(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        return False
+    return str(value).strip().lower() in {"", "nan", "none", "null", "<na>"}
+
+
+def _near_land_token(value: object) -> str:
+    """``true``, ``false``, or ``unknown``. A blank cell stays unknown."""
+    if isinstance(value, (bool, np.bool_)):
+        return "true" if bool(value) else "false"
+    if _blank_distance(value):
+        return "unknown"
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "t"}:
+        return "true"
+    if text in {"0", "false", "no", "n", "f"}:
+        return "false"
+    if text in {"unknown", "na", "n/a"}:
+        return "unknown"
+    raise ValueError(f"near_land value {value!r} is not true, false, or unknown")
+
+
+def _distance_km(value: object) -> float:
+    if _blank_distance(value):
+        return float("nan")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"distance_to_land_km value {value!r} is not a distance") from exc
+    if not np.isfinite(number):
+        return float("nan")
+    return number
+
+
+def read_distance_to_land(path: str | Path | None = None) -> pd.DataFrame:
+    """``sample_id``, ``distance_to_land_km``, and ``near_land`` from the audit CSV.
+
+    ``path`` defaults to ``tcir/audit/distance_to_land.csv``. Blank distances
+    stay NaN. ``near_land`` stays ``unknown`` when the audit says so.
+    """
+    csv_path = DEFAULT_DISTANCE_CSV if path in (None, "", "null") else Path(path)
+    if not csv_path.is_file():
+        raise FileNotFoundError(
+            f"TCIR distance table {csv_path} is missing. Nothing is downloaded."
+        )
+    table = pd.read_csv(csv_path)
+    table.columns = [str(column).strip() for column in table.columns]
+    missing = [column for column in _DISTANCE_COLUMNS if column not in table.columns]
+    if missing:
+        raise ValueError(f"distance_to_land.csv missing {missing}")
+    out = pd.DataFrame(
+        {
+            "sample_id": table["sample_id"].astype(str).str.strip(),
+            "distance_to_land_km": [_distance_km(value) for value in table["distance_to_land_km"].tolist()],
+            "near_land": [_near_land_token(value) for value in table["near_land"].tolist()],
+        }
+    )
+    if out["sample_id"].duplicated().any():
+        raise ValueError("distance_to_land.csv repeats a sample_id")
+    return out
+
+
+def attach_distance_to_land(
+    frame: pd.DataFrame, path: str | Path | None = None
+) -> pd.DataFrame:
+    """Left-join the audit distances onto ``sample_id``.
+
+    A sample that is not in the CSV, or a row whose distance is blank,
+    keeps a null distance and ``near_land`` ``unknown``. The null is not
+    replaced with 0 km or with ``false``.
+    """
+    if "sample_id" not in frame.columns:
+        raise ValueError("TCIR distance join needs sample_id")
+    flags = read_distance_to_land(path)
+    lookup = flags.set_index("sample_id")
+    distance: list[float] = []
+    near: list[str] = []
+    for sample_id in frame["sample_id"].astype(str).tolist():
+        if sample_id not in lookup.index:
+            distance.append(float("nan"))
+            near.append("unknown")
+            continue
+        row = lookup.loc[sample_id]
+        if isinstance(row, pd.DataFrame):
+            raise ValueError(f"distance_to_land.csv repeats {sample_id}")
+        distance.append(_distance_km(row["distance_to_land_km"]))
+        near.append(_near_land_token(row["near_land"]))
+    out = frame.copy()
+    out["distance_to_land_km"] = np.asarray(distance, dtype=float)
+    out["near_land"] = near
+    return out
+
+
 def orient(
     frame: np.ndarray, hemisphere: str, flip_southern: bool = False
 ) -> tuple[np.ndarray, bool]:
@@ -274,13 +381,15 @@ def build_manifest(
     flip_southern: bool = False,
     max_missing_fraction: float = MAX_MISSING_FRACTION,
     block: int = BLOCK,
+    distance_csv: str | Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     """Return (manifest, exclusions, pixel stats).
 
     With ``export`` each kept IR1 frame is saved as ``ir1/<sample_id>.npy``
     under ``manifest_dir`` and ``image_path`` points there (relative), so
     ``src.data_loader`` can read it. Without ``export`` ``image_path`` is
-    ``<file>#<h5_index>`` for reference only.
+    ``<file>#<h5_index>`` for reference only. ``distance_csv`` defaults to
+    the committed audit table and is joined on ``sample_id``.
     """
     manifest_dir = Path(manifest_dir).resolve()
     image_dir = manifest_dir / "ir1"
@@ -326,6 +435,7 @@ def build_manifest(
     excluded = pd.concat(excluded_parts, ignore_index=True)
     if "split" in manifest.columns or "source_split" in manifest.columns:
         raise AssertionError("TCIR manifest must not carry split or source_split")
+    manifest = attach_distance_to_land(manifest, distance_csv)
     manifest = require_valid(manifest)
     pixel = stats.as_dict()
     pixel["kept_frames_with_some_nan"] = frames_with_nan

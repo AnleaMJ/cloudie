@@ -393,6 +393,7 @@ def test_tcir_path_trains_on_a_local_fixture(tmp_path: Path) -> None:
     pytest.importorskip("torch")
     pytest.importorskip("h5py")
     pytest.importorskip("matplotlib")
+    import numpy as np
     import pandas as pd
 
     from src.splits import storm_ids_by_split
@@ -428,6 +429,12 @@ def test_tcir_path_trains_on_a_local_fixture(tmp_path: Path) -> None:
     assert metrics["wind_conversion"].startswith("0.93, derived from WMO/TD-1555")
     assert "val_raw" in metrics
     assert metrics["val_raw"]["n"] == metrics["val"]["n"]
+    assert metrics["intensity_balance"]["loss_weighting"] == "none"
+    assert metrics["intensity_balance"]["balanced_sampling"] is False
+    assert "val_on_fix" not in metrics
+    assert set(manifest["near_land"]) == {"unknown"}
+    assert manifest["distance_to_land_km"].isna().all()
+    assert np.allclose(manifest["loss_weight"].astype(float), 1.0)
 
 
 def test_incyde_trains_on_fixtures_and_init_from_skips_the_mismatch(tmp_path: Path) -> None:
@@ -487,10 +494,37 @@ def test_incyde_trains_on_fixtures_and_init_from_skips_the_mismatch(tmp_path: Pa
         assert key in metrics["val"]
         assert key in metrics["val_raw"]
     assert metrics["val"]["n"] == metrics["val_raw"]["n"]
+    assert metrics["on_fix_only_eval"] is False
+    assert "val_on_fix" not in metrics
+    assert metrics["intensity_balance"]["loss_weighting"] == "none"
+    assert metrics["intensity_balance"]["balanced_sampling"] is False
     assert metrics["norm_by_dataset"]["incyde"]["source_split"] == "train"
+    flags = tmp_path / "frame_flags.csv"
+    flags.write_text(
+        "filename,on_fix,lat,lon,distance_to_land_km,near_land\n"
+        "15JUN2019_1200_9.jpg,false,10,70,40,false\n"
+        "01JAN2018_0030_1.jpg,true,12,80,5,true\n",
+        encoding="utf-8",
+    )
+    config["incyde"]["on_fix_only_eval"] = True
+    config["incyde"]["frame_flags_csv"] = str(flags)
+    config["paths"]["runs"] = str(tmp_path / "onfix")
+    on_fix_dir = run_training(
+        config, dataset="incyde", model="simplecnn", max_steps=1, device="cpu"
+    )
+    on_fix_report = _assert_run_record(on_fix_dir, config["paths"]["checkpoint_name"])
+    assert on_fix_report["on_fix_only_eval"] is True
+    assert on_fix_report["val"]["n"] > 0
+    assert on_fix_report["val_on_fix"]["n"] == 0
+    assert on_fix_report["val_raw_on_fix"]["n"] == 0
+    assert on_fix_report["test"]["scored"] is False
+    config["incyde"]["on_fix_only_eval"] = False
+    config["paths"]["runs"] = str(tmp_path / "runs")
     assert metrics["norm_by_dataset"]["incyde"]["pixel_kind"] == "jpeg_uncalibrated"
     assert metrics["norm_by_dataset"]["incyde"]["mean"] == pytest.approx(10.0)
     manifest = pd.read_csv(run_dir / "split_manifest.csv")
+    assert set(manifest["on_fix"]) == {"unknown"}
+    assert np.allclose(manifest["loss_weight"].astype(float), 1.0)
     assert set(manifest["wind_averaging"]) == {"3min"}
     assert np.allclose(manifest["wind_kt_3min"], manifest["wind_kt"])
     eval_rows = manifest.loc[manifest["split"] != "train"]
@@ -545,3 +579,38 @@ def test_incyde_trains_on_fixtures_and_init_from_skips_the_mismatch(tmp_path: Pa
     parent_payload = torch.load(parent, map_location="cpu", weights_only=False)
     for key, tensor in parent_payload["state_dict"].items():
         assert torch.allclose(payload["state_dict"][key], tensor)
+    assert payload["intensity_balance"]["loss_weighting"] == "none"
+
+
+def test_none_weighting_matches_the_unweighted_smooth_l1() -> None:
+    pytest.importorskip("torch")
+    import torch
+    import torch.nn.functional as F
+
+    from src.train import batch_wind_loss
+
+    prediction = torch.tensor([1.0, 3.0, 8.0])
+    target = torch.tensor([0.0, 1.0, 2.0])
+    weird = torch.tensor([0.1, 5.0, 0.2])
+    plain = F.smooth_l1_loss(prediction, target)
+    assert torch.allclose(batch_wind_loss(prediction, target, weird, "none"), plain)
+    weighted = batch_wind_loss(prediction, target, weird, "inverse_freq")
+    assert not torch.allclose(weighted, plain)
+
+
+def test_balanced_sampler_draws_every_bin() -> None:
+    pytest.importorskip("torch")
+    from src.train import _bin_weight_table, align_bin_weights, make_balanced_sampler
+
+    names = ["D_DD", "CS", "SCS", "VSCS", "ESCS_SUCS"]
+    labels = (
+        ["D_DD"] * 40
+        + ["CS"] * 20
+        + ["SCS"] * 8
+        + ["VSCS"] * 4
+        + ["ESCS_SUCS"] * 2
+    )
+    counts = {name: labels.count(name) for name in names}
+    weights = align_bin_weights(labels, _bin_weight_table(counts, "inverse_freq"))
+    drawn = [labels[int(index)] for index in make_balanced_sampler(weights, 800, seed=0)]
+    assert set(drawn) == set(names)
