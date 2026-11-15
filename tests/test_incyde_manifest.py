@@ -74,17 +74,35 @@ def _write_tree(root: Path) -> tuple[Path, Path, Path]:
             "default_exclude": ["true", "false", "false"],
         }
     ).to_csv(exclusions, index=False)
-    return labels, split, exclusions
+    # 0530 IST is a synoptic slot, but the file says false. 0600 is not, and the file says true.
+    flags = root / "frame_flags.csv"
+    pd.DataFrame(
+        {
+            "filename": [
+                "12NOV2013_0530_1.jpg",
+                "12NOV2013_0600_1.jpg",
+                "13NOV2013_0830_1.jpg",
+                "14NOV2013_0000_1.jpg",
+                "10SEP2017_0530_1.jpg",
+                "15NOV2013_0300_1.jpg",
+            ],
+            "on_fix": ["false", "true", "unknown", "false", "true", "false"],
+            "near_land": ["false", "true", "unknown", "false", "false", "unknown"],
+            "dist_to_coast_km": ["10.0", "20.5", "", "5", "1", "unknown"],
+        }
+    ).to_csv(flags, index=False)
+    return labels, split, exclusions, flags
 
 
 def test_default_manifest_keeps_flagged_rows_and_raw_labels(tmp_path: Path) -> None:
-    labels, split, exclusions = _write_tree(tmp_path / "src")
+    labels, split, exclusions, flags = _write_tree(tmp_path / "src")
     frame, summary = build_manifest(
         tmp_path / "src",
         tmp_path / "manifest.csv",
         storm_split_path=split,
         exclusions_path=exclusions,
         labels_path=labels,
+        frame_flags_path=flags,
     )
     assert "12NOV2013_0530_1_flip_h" not in set(frame["sample_id"])
     assert "10SEP2017_0530_1" not in set(frame["sample_id"])
@@ -99,8 +117,16 @@ def test_default_manifest_keeps_flagged_rows_and_raw_labels(tmp_path: Path) -> N
     assert "no 1-minute conversion" in str(summary["metrics_use"])
     assert summary["year_holdout_2019"] == "not_built"
     by_id = frame.set_index("sample_id")
-    assert bool(by_id.loc["12NOV2013_0530_1", "on_fix"]) is True
-    assert bool(by_id.loc["12NOV2013_0600_1", "on_fix"]) is False
+    assert bool(by_id.loc["12NOV2013_0530_1", "on_fix"]) is False
+    assert bool(by_id.loc["12NOV2013_0600_1", "on_fix"]) is True
+    assert by_id.loc["13NOV2013_0830_1", "on_fix"] == "unknown"
+    assert by_id.loc["13NOV2013_0830_1", "near_land"] == "unknown"
+    assert by_id.loc["13NOV2013_0830_1", "dist_to_coast_km"] == "unknown"
+    assert by_id.loc["15NOV2013_0300_1", "near_land"] == "unknown"
+    assert by_id.loc["15NOV2013_0300_1", "dist_to_coast_km"] == "unknown"
+    assert summary["on_fix_unknown_rows"] == 1
+    assert summary["near_land_unknown_rows"] == 2
+    assert summary["dist_to_coast_unknown_rows"] == 2
     assert by_id.loc["12NOV2013_0530_1", "split"] == "train"
     assert by_id.loc["13NOV2013_0830_1", "split"] == "val"
     assert by_id.loc["14NOV2013_0000_1", "split"] == "test"
@@ -109,17 +135,34 @@ def test_default_manifest_keeps_flagged_rows_and_raw_labels(tmp_path: Path) -> N
 
 
 def test_drop_flagged_removes_the_optional_flags(tmp_path: Path) -> None:
-    labels, split, exclusions = _write_tree(tmp_path / "src")
+    labels, split, exclusions, flags = _write_tree(tmp_path / "src")
     frame, summary = build_manifest(
         tmp_path / "src",
         tmp_path / "manifest.csv",
         storm_split_path=split,
         exclusions_path=exclusions,
         labels_path=labels,
+        frame_flags_path=flags,
         drop_flagged=True,
     )
     assert "15NOV2013_0300_1" not in set(frame["sample_id"])
     assert summary["drop_flagged"] is True
+
+
+def test_missing_frame_flag_is_not_defaulted(tmp_path: Path) -> None:
+    labels, split, exclusions, flags = _write_tree(tmp_path / "src")
+    table = pd.read_csv(flags)
+    table = table.loc[table["filename"] != "14NOV2013_0000_1.jpg"]
+    table.to_csv(flags, index=False)
+    with pytest.raises(IncydeDataError, match="not defaulted"):
+        build_manifest(
+            tmp_path / "src",
+            tmp_path / "manifest.csv",
+            storm_split_path=split,
+            exclusions_path=exclusions,
+            labels_path=labels,
+            frame_flags_path=flags,
+        )
 
 
 def test_bad_md5_stops_before_a_manifest(tmp_path: Path) -> None:

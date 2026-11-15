@@ -22,10 +22,11 @@ It is not redrawn. ``cv_group`` is ``cooccurrence_group`` so a later grouped
 CV can keep concurrent storms in one fold. The INCYDE ``Set`` column is
 stored as ``source_split`` and is not the modeling split.
 
-``on_fix`` is true when the filename clock, read as IST and shifted by
--05:30, lands on 00/03/06/09/12/15/18/21 UTC, and the frame is not flagged
-``outside_imd_track_span``. That is the IMD 3-hourly synoptic cadence.
-It is not a row-by-row join to the IMD workbook.
+``on_fix``, ``near_land``, and ``dist_to_coast_km`` come from
+``incyde/audit/frame_flags.csv``, joined on the original filename.
+``on_fix`` stays the file's true or false. ``near_land`` and
+``dist_to_coast_km`` may be ``unknown``. Unknown is not turned into
+false or zero.
 
 Pixels are an 8-bit IR render, not calibrated brightness temperature.
 There is no ``year_holdout_2019`` path in this module.
@@ -62,10 +63,11 @@ COMPARABILITY = (
     "Not like-for-like with Agrawal et al. 2024. " + RAW_3MIN_METRICS
 )
 ON_FIX_DEFINITION = (
-    "on_fix is true when the filename clock is IST, minus 05:30, "
-    "and the UTC time is exactly 00/03/06/09/12/15/18/21:00, "
-    "and the frame is not flagged outside_imd_track_span. "
-    "This is the IMD 3-hourly synoptic cadence, not a workbook join."
+    "on_fix is joined from incyde/audit/frame_flags.csv on filename. "
+    "It is true only when that file says true: the UTC timestamp equals "
+    "an IMD best-track time_resolved for that storm. "
+    "near_land and dist_to_coast_km come from the same file. "
+    "unknown stays unknown and is not defaulted to false or zero."
 )
 _SYNOPTIC_UTC_HOURS = frozenset({0, 3, 6, 9, 12, 15, 18, 21})
 _MONTHS = {
@@ -198,6 +200,47 @@ def _exclusion_frame(path: Path) -> pd.DataFrame:
     return out
 
 
+def _flag_token(value: object, column: str, filename: str) -> str:
+    """Return true, false, or unknown. Blank and any other text raise."""
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y", "t"}:
+        return "true"
+    if text in {"false", "0", "no", "n", "f"}:
+        return "false"
+    if text == "unknown":
+        return "unknown"
+    raise IncydeDataError(
+        f"{filename}: {column} is {value!r}. Expected true, false, or unknown. "
+        "Unknown is not defaulted."
+    )
+
+
+def read_frame_flags(path: str | Path) -> pd.DataFrame:
+    """Read audit flags. Empty distance is unknown, not zero."""
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise IncydeDataError(f"missing frame flags {file_path}")
+    raw = pd.read_csv(file_path, dtype=str, keep_default_na=False)
+    missing = {"filename", "on_fix", "near_land", "dist_to_coast_km"} - set(raw.columns)
+    if missing:
+        raise IncydeDataError(f"frame flags missing {sorted(missing)}")
+    out = pd.DataFrame({"filename": raw["filename"].map(lambda value: Path(str(value)).name)})
+    if out["filename"].duplicated().any() or out["filename"].eq("").any():
+        raise IncydeDataError("frame flags have a blank or repeated filename")
+    out["on_fix"] = [
+        _flag_token(value, "on_fix", name)
+        for value, name in zip(raw["on_fix"], out["filename"], strict=True)
+    ]
+    out["near_land"] = [
+        _flag_token(value, "near_land", name)
+        for value, name in zip(raw["near_land"], out["filename"], strict=True)
+    ]
+    distance = raw["dist_to_coast_km"].astype(str).str.strip()
+    blank = distance.eq("") | distance.str.lower().isin({"nan", "none", "<na>", "null"})
+    out["dist_to_coast_km"] = np.where(blank | distance.str.lower().eq("unknown"), "unknown", distance)
+    return out
+
+
 def _source_split(value: object) -> str:
     return _SET_MAP.get(str(value).strip().lower(), str(value).strip().lower())
 
@@ -259,6 +302,7 @@ def build_manifest(
     labels_path: str | Path | None = None,
     drop_flagged: bool = False,
     check_images: bool = True,
+    frame_flags_path: str | Path | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     """Write a validated manifest of original frames and return it with a summary.
 
@@ -269,6 +313,8 @@ def build_manifest(
     image_dir = _image_dir(root, labels_file)
     split_file = Path(storm_split_path) if storm_split_path else AUDIT_DIR / "storm_split.csv"
     exclusion_file = Path(exclusions_path) if exclusions_path else AUDIT_DIR / "exclusions.csv"
+    flags_file = Path(frame_flags_path) if frame_flags_path else AUDIT_DIR / "frame_flags.csv"
+    flags = read_frame_flags(flags_file).set_index("filename")
     storms = _storm_split_frame(split_file)
     exclusions = _exclusion_frame(exclusion_file)
     labels = _labels_frame(labels_file)
@@ -312,8 +358,19 @@ def build_manifest(
         sequences = sorted(merged.loc[missing_storm, "Sequence"].unique().tolist())
         raise IncydeDataError(f"sequences missing from storm_split.csv: {sequences[:8]}")
 
-    outside = merged["qc_flag"].str.contains("outside_imd_track_span", na=False)
-    on_fix = merged["on_fix_clock"].astype(bool) & ~outside
+    missing_flags = sorted(set(merged["filename"].astype(str)) - set(flags.index.astype(str)))
+    if missing_flags:
+        raise IncydeDataError(
+            f"{len(missing_flags)} filenames are missing from frame flags, first: {missing_flags[:3]}. "
+            "Missing on_fix is not defaulted."
+        )
+    on_fix_token = merged["filename"].map(flags["on_fix"]).astype(str)
+    near_land = merged["filename"].map(flags["near_land"]).astype(str)
+    distance = merged["filename"].map(flags["dist_to_coast_km"]).astype(str)
+    on_fix_value = [
+        True if token == "true" else False if token == "false" else "unknown"
+        for token in on_fix_token.tolist()
+    ]
     paths = [str((image_dir / name).resolve()) for name in merged["filename"].astype(str)]
     missing_files = [path for path in paths if not Path(path).is_file()]
     if missing_files:
@@ -332,7 +389,9 @@ def build_manifest(
             "split": merged["proposed_split"].astype(str),
             "source_split": merged["Set"].map(_source_split) if "Set" in merged.columns else "unspecified",
             "cv_group": merged["cooccurrence_group"].map(lambda value: str(int(value))),
-            "on_fix": on_fix.to_numpy(),
+            "on_fix": on_fix_value,
+            "near_land": near_land.tolist(),
+            "dist_to_coast_km": distance.tolist(),
             "timestamp": merged["timestamp"].astype(str),
             "filename_time_ist": merged["filename_time_ist"].astype(str),
             "basin": basin.astype(str) if isinstance(basin, pd.Series) else basin,
@@ -370,7 +429,17 @@ def build_manifest(
 
     manifest = manifest.sort_values(["incyde_sequence", "timestamp", "object_index", "sample_id"]).reset_index(drop=True)
     validated = require_valid(manifest)
-    for column in ("split", "source_split", "cv_group", "on_fix", "timestamp", "wind_averaging_s", "qc_flag"):
+    for column in (
+        "split",
+        "source_split",
+        "cv_group",
+        "on_fix",
+        "near_land",
+        "dist_to_coast_km",
+        "timestamp",
+        "wind_averaging_s",
+        "qc_flag",
+    ):
         validated[column] = manifest[column].to_numpy()
     validated["wind_averaging_s"] = WIND_AVERAGING_S
 
@@ -399,7 +468,12 @@ def build_manifest(
         "drop_flagged": bool(drop_flagged),
         "rows_written": int(len(validated)),
         "storms_written": int(validated["storm_id"].nunique()),
-        "on_fix_rows": int(np.asarray(validated["on_fix"], dtype=bool).sum()),
+        "on_fix_rows": int((on_fix_token == "true").sum()),
+        "on_fix_false_rows": int((on_fix_token == "false").sum()),
+        "on_fix_unknown_rows": int((on_fix_token == "unknown").sum()),
+        "near_land_unknown_rows": int((near_land == "unknown").sum()),
+        "dist_to_coast_unknown_rows": int((distance == "unknown").sum()),
+        "frame_flags_source": str(flags_file),
         "modeling_split": by_split,
         "cv_group": "cooccurrence_group",
         "split_source": str(split_file),
@@ -441,6 +515,7 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Verify this zip's MD5 and stop when it does not match. Does not download or unzip.",
     )
+    parser.add_argument("--frame-flags", type=Path, default=None)
     parser.add_argument("--skip-image-check", action="store_true")
     args = parser.parse_args(argv)
     if args.zip is not None:
@@ -453,6 +528,7 @@ def main(argv: list[str] | None = None) -> None:
         labels_path=args.labels,
         drop_flagged=args.drop_flagged,
         check_images=not args.skip_image_check,
+        frame_flags_path=args.frame_flags,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
 
