@@ -46,6 +46,15 @@ Do not commit imagery or best-track dumps. CI must not download them.
   2017 file `TCIR-ALL_2017.h5` is a separate year and is not loaded here.
   ATLN and EPAC storms from 2003–2016 overlap NASA Tropical Storm storms;
   map both to one storm key before splitting a combined manifest.
+- INCYDE, the cropped INSAT-3D North Indian Ocean cyclone set, Zenodo
+  record 8015544, file `Cropped_cyclone_data.zip`, MD5
+  `ed5dac254c689e5a327dee7580324347`. `python -m src.incyde --root <extract> --out data/incyde/manifest.csv`
+  reads local JPEGs and `Cropped_cyclone_labels.csv`. It does not download
+  the zip. Filename clocks are IST. `Sequence` is the storm key; the
+  filename `obj` is not. The split and the exclusion list committed under
+  `incyde/audit/` are the source of truth. Labels are IMD 3-minute winds.
+  About 91% of in-span original labels are interpolated, and only two
+  storms reach SuCS. Tests use tiny fixtures and never download.
 - IBTrACS v4: https://doi.org/10.25921/82ty-9e16. Labels only.
 - INSAT-3D / 3DR: MOSDAC, registration required, not redistributed here.
   The intensity page reads the public Infrared-1 JPEG on

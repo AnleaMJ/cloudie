@@ -1,0 +1,4 @@
+# Local TCIR and IBTrACS dumps — never commit the HDF5 files or best-track CSVs
+*.h5
+*.tar.gz
+ibtracs*.csv

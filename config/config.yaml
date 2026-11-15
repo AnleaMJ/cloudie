@@ -17,6 +17,8 @@ paths:
   tcir_files: []
   tcir_manifest_dir: data/tcir
   frame_cache: artifacts/frame_cache
+  # Extracted Cropped_cyclone_data directory. This file does not download it.
+  incyde_root: data/incyde
   # Empty until a real run is published. CLOUDIE_RUN_ID and CLOUDIE_HF_MODEL_REPO override these.
   run_id: null
   hf_model_repo: null
@@ -47,6 +49,28 @@ data:
   grouping_note: >
     Intensity category is this project's grouping on the configured knot bins.
     It is not an official IMD class.
+labels:
+  # Training target for TCIR, NASA, and INCYDE. Raw knots stay on wind_speed_kt.
+  label_column: wind_kt_3min
+  # Derived at-sea factor, not a WMO constant. See docs/TRAINING.md.
+  wind_1min_to_3min: 0.93
+  # flag: still multiply near-land 1-minute rows and set conversion_exposure_flag.
+  # raw: leave those rows at the 1-minute label.
+  near_land_policy: flag
+  # The factor is for open water farther offshore than this, in kilometres.
+  open_water_km: 20
+incyde:
+  # null uses incyde/audit/storm_split.csv and exclusions.csv.
+  manifest_csv: null
+  storm_split_csv: null
+  exclusions_csv: null
+  archive: null
+  drop_qc_flags: []
+  n_folds: 5
+  cv_val_fold: 0
+  cv_seed: 42
+  # Optional storm_id,fold file. When set, it replaces the seeded folds.
+  cv_folds_csv: null
 split:
   strategy: storm_wise
   test_fraction: 0.2

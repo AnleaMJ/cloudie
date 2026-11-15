@@ -15,6 +15,7 @@ paths:
   tcir_files: []
   tcir_manifest_dir: data/tcir
   frame_cache: artifacts/frame_cache
+  incyde_root: data/incyde
   # Empty until a real run is published. CLOUDIE_RUN_ID and CLOUDIE_HF_MODEL_REPO override these.
   run_id: null
   hf_model_repo: null
@@ -38,6 +39,21 @@ data:
   grouping_note: >
     Intensity category is this project's grouping on the configured knot bins.
     It is not an official IMD class.
+labels:
+  label_column: wind_kt_3min
+  wind_1min_to_3min: 0.93
+  near_land_policy: flag
+  open_water_km: 20
+incyde:
+  manifest_csv: null
+  storm_split_csv: null
+  exclusions_csv: null
+  archive: null
+  drop_qc_flags: []
+  n_folds: 5
+  cv_val_fold: 0
+  cv_seed: 42
+  cv_folds_csv: null
 split:
   strategy: storm_wise
   test_fraction: 0.2

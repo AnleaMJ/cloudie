@@ -59,7 +59,7 @@ The IMD best-track workbook used for the label audit is
 | `match.py` | `SEQUENCE_TO_IMD` mapping, including Sequence 46 → `2017-010`. |
 | `checks.py` | Split-leakage and QC sanity checks on a built manifest. |
 | `tables.py` | Per-class / per-split counts. |
-| `frame_flags.csv` | One row per **original** INCYDE filename (21,313 rows, same basename key as `exclusions.csv`). Augmented copies inherit the source frame's flags (strip `_(flip_h|flip_v|rot_90|rot_180|rot_270)`). Columns: `filename`, `on_fix`, `lat`, `lon`, `dist_to_coast_km`, `near_land`. |
+| `frame_flags.csv` | One row per **original** INCYDE filename (21,313 rows, same basename key as `exclusions.csv`). Augmented copies inherit the source frame's flags (strip `_(flip_h|flip_v|rot_90|rot_180|rot_270)`). Columns: `filename`, `on_fix`, `lat`, `lon`, `distance_to_land_km`, `near_land`. The distance column is named `distance_to_land_km` (km) so it matches the loader in #35; open water is a distance greater than 20 km. |
 | `build_frame_flags.py` | Rebuilds `frame_flags.csv` from the manifest, the IMD workbook, and Natural Earth 10m land. |
 
 Unnamed depressions have an empty `name`. `peak_imd_class` uses the IMD
@@ -72,7 +72,7 @@ SCS ≤63, VSCS ≤89, ESCS ≤119, SuCS ≥120 kt.
 `frame_flags.csv` is keyed by `filename`, using the same basename keys as
 `exclusions.csv` (for example `08OCT2013_0830_1.jpg`). The committed file
 has one row per original frame (21,313). Augmented copies are not listed;
-they inherit `on_fix`, `lat`, `lon`, `dist_to_coast_km`, and `near_land`
+they inherit `on_fix`, `lat`, `lon`, `distance_to_land_km`, and `near_land`
 from their source filename by stripping `_(flip_h|flip_v|rot_90|rot_180|rot_270)`.
 Rebuild with `--all-frames` if you need a row for every JPEG.
 
@@ -97,7 +97,7 @@ Counts in the committed file: **1,854 of 21,313 originals** are
 outside-span originals are false). The remaining 19,459 originals are
 `on_fix=false`.
 
-### Storm-centre position, `dist_to_coast_km`, and `near_land`
+### Storm-centre position, `distance_to_land_km`, and `near_land`
 
 The storm centre at the frame time is taken from the coincident IMD
 fix, or linearly interpolated in time between the two neighbouring
@@ -106,15 +106,15 @@ both finite and `pos_suspect` is false. We never interpolate across
 an unusable fix, never extrapolate past the first or last fix, and
 never invent a position.
 
-`dist_to_coast_km` is the distance in kilometres from that point to
+`distance_to_land_km` is the distance in kilometres from that point to
 Natural Earth 10m land, in a regional azimuthal-equidistant projection
 centred on 15°N 80°E. It is **0** when the centre is on or inside a
 land polygon. `near_land` is:
 
-- `true` if `dist_to_coast_km` ≤ 20, or the centre is over land
-- `false` if the centre is more than 20 km offshore
+- `true` if `distance_to_land_km` ≤ 20, or the centre is over land
+- `false` if the centre is more than 20 km offshore (open water is strictly greater than 20 km)
 - `unknown` if there is no usable position (`lat`, `lon`, and
-  `dist_to_coast_km` are then left blank)
+  `distance_to_land_km` are then left blank)
 
 Coastline source: **Natural Earth 10m land, version 5.1.1**, public
 domain, downloaded on 16 November 2026 from

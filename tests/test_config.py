@@ -14,7 +14,19 @@ LOADERS = ("src.config",)
 PROJECT_EDGES = [17.0, 34.0, 48.0, 64.0, 91.0]
 REQUIRED = {
     "project": ["name", "seed", "honesty"],
-    "paths": ["manifest", "artifacts", "reports", "checkpoint_name"],
+    "paths": ["manifest", "artifacts", "reports", "checkpoint_name", "incyde_root"],
+    "labels": ["label_column", "wind_1min_to_3min", "near_land_policy", "open_water_km"],
+    "incyde": [
+        "manifest_csv",
+        "storm_split_csv",
+        "exclusions_csv",
+        "archive",
+        "drop_qc_flags",
+        "n_folds",
+        "cv_val_fold",
+        "cv_seed",
+        "cv_folds_csv",
+    ],
     "data": [
         "image_size",
         "channels",

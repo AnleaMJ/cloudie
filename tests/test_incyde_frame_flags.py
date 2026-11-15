@@ -17,7 +17,7 @@ AUDIT_DIR = Path(__file__).resolve().parents[1] / "incyde" / "audit"
 FRAME_FLAGS = AUDIT_DIR / "frame_flags.csv"
 EXCLUSIONS = AUDIT_DIR / "exclusions.csv"
 
-COLUMNS = ["filename", "on_fix", "lat", "lon", "dist_to_coast_km", "near_land"]
+COLUMNS = ["filename", "on_fix", "lat", "lon", "distance_to_land_km", "near_land"]
 N_ROWS = 21313
 ON_FIX_TRUE = 1854
 ON_FIX_FALSE = 19459
@@ -94,13 +94,13 @@ def test_unknown_position_rows_leave_coordinates_blank() -> None:
     flags = _load_flags()
     unknown = flags["near_land"] == "unknown"
     known = ~unknown
-    assert (flags.loc[unknown, ["lat", "lon", "dist_to_coast_km"]] == "").all().all()
-    assert (flags.loc[known, ["lat", "lon", "dist_to_coast_km"]] != "").all().all()
-    dist = flags.loc[known, "dist_to_coast_km"].astype(float)
+    assert (flags.loc[unknown, ["lat", "lon", "distance_to_land_km"]] == "").all().all()
+    assert (flags.loc[known, ["lat", "lon", "distance_to_land_km"]] != "").all().all()
+    dist = flags.loc[known, "distance_to_land_km"].astype(float)
     assert ((flags.loc[known, "near_land"] == "true") == (dist <= 20.0)).all()
     # Inland AMPHAN (21.9N 88.4E) and post-landfall PHAILIN (20.5N 84.5E).
     inland = flags.set_index("filename").loc[
         ["20MAY2020_1730_1.jpg", "13OCT2013_0530_1.jpg"]
     ]
     assert (inland["near_land"] == "true").all()
-    assert (inland["dist_to_coast_km"].astype(float) == 0.0).all()
+    assert (inland["distance_to_land_km"].astype(float) == 0.0).all()

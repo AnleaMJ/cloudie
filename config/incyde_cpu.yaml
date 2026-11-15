@@ -1,0 +1,41 @@
+# INCYDE CPU model v0.1 (SimpleCNN). Used by scripts/incyde_cpu/*.
+# Device-neutral: device auto picks xpu, then cuda, then cpu (GPU needs CLOUDIE_ALLOW_GPU=1).
+project:
+  seed: 42
+labels:
+  # Standard: IMD 3-minute sustained wind. INCYDE labels are used unchanged.
+  # 1-minute sources (TCIR, NASA) are converted with ONE factor:
+  # 0.93, derived from WMO/TD-1555 Tables 1.1 and 1.2, at-sea exposure
+  # (Harper, Kepert & Ginger 2010). Derived, NOT a WMO constant.
+  # Pending Researchy's verification.
+  one_to_three_min_factor: 0.93
+  one_to_three_min_factor_status: derived_pending_verification
+  # Rows whose centre is within this distance of land are flagged (near_land).
+  near_land_km: 20
+  # false: near-land TCIR rows are left out of pretraining instead of converted.
+  pretrain_keep_near_land: false
+data:
+  image_size: 96
+  # Main's project bins (src/schema.py). Not official IMD classes.
+  imd5_edges_kt: [17, 34, 48, 64, 91]
+  imd5_names: [D_DD, CS, SCS, VSCS, ESCS_SUCS]
+model:
+  name: simple_cnn
+  dropout: 0.3
+  channels: 1
+train:
+  device: auto
+  batch_size: 64
+  epochs: 30
+  lr: 0.001
+  weight_decay: 0.0001
+  patience: 6
+  class_loss_weight: 0.5
+  num_workers: 0
+cv:
+  n_folds: 5
+  seed: 42
+augment:
+  rot_180: true
+  masked_rotation: true
+  flips: false
