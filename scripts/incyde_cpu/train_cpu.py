@@ -68,6 +68,17 @@ def git_sha() -> str | None:
         return None
 
 
+def git_dirty() -> list[str]:
+    """Paths with uncommitted changes when the run started (empty = clean)."""
+    try:
+        text = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=REPO, capture_output=True, text=True, check=True
+        ).stdout
+        return [line[3:] for line in text.splitlines() if line.strip()]
+    except Exception:
+        return ["unknown"]
+
+
 def net_config(cfg: dict) -> dict:
     """The keys ``src.train.build_net`` reads."""
     return {
@@ -561,7 +572,7 @@ def cmd_finetune(args, cfg, device):
     prep = json.loads((args.cache / "incyde_prep.json").read_text())
     orig = index["is_original"]
     manifest = {
-        "kind": "finetune" if args.init_from else "scratch", "git_commit": git_sha(), "config": cfg,
+        "kind": "finetune" if args.init_from else "scratch", "git_commit": git_sha(), "git_dirty": git_dirty(), "config": cfg,
         "seed": seed, "init_from": parent, "device": str(device), "hardware": hardware(),
         "wall_time_s_fixed_split": round(wall_main, 1), "wall_time_s_total": round(time.time() - t_all, 1),
         "best_epoch": best_epoch, "history": history, "data": prep,
