@@ -90,6 +90,10 @@ REQUIRED = {
         "max_iter",
         "bootstrap_resamples",
         "per_storm_breakdown",
+        "cv_pool",
+        "cv_group_column",
+        "cv_collapse_rare",
+        "cv_assign",
     ],
 }
 SELECTION_KEYS = [

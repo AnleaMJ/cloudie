@@ -23,7 +23,10 @@ Feature selection calls
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -41,6 +44,8 @@ from src.splits import (
     null_cross_split_links,
     storm_ids_by_split,
 )
+
+logger = logging.getLogger(__name__)
 
 GLCM_NAMES = (
     "glcm_contrast",
@@ -515,7 +520,11 @@ _CARRIED_COLUMNS = (
     "relative_time_s",
     "source_split",
     "wind_averaging",
+    "wind_averaging_s",
     "on_fix",
+    "near_land",
+    "distance_to_land_km",
+    "cv_group",
 )
 
 
@@ -525,12 +534,76 @@ def _extract_path(task: tuple[str, FeatureSpec, float]) -> dict[str, float]:
     return extract_image_features(load_image(path), spec, max_missing_fraction)
 
 
+def _spec_fingerprint(spec: FeatureSpec, max_missing_fraction: float) -> str:
+    """Identity of the extractor settings stored next to an image checkpoint."""
+    payload = {
+        "calibrated": bool(spec.calibrated),
+        "cold_thresholds": [float(value) for value in spec.cold_thresholds],
+        "radial_bins": int(spec.radial_bins),
+        "eye_radius_fraction": float(spec.eye_radius_fraction),
+        "cdo_outer_fraction": float(spec.cdo_outer_fraction),
+        "eye_contrast_min": float(spec.eye_contrast_min),
+        "dav_radii_fractions": [float(value) for value in spec.dav_radii_fractions],
+        "dav_annulus_width_fraction": float(spec.dav_annulus_width_fraction),
+        "glcm_levels": int(spec.glcm_levels),
+        "glcm_distance": int(spec.glcm_distance),
+        "max_missing_fraction": float(max_missing_fraction),
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
+def _checkpoint_spec_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".spec.json")
+
+
+def _image_checkpoint_rows(
+    path: Path, spec: FeatureSpec, max_missing_fraction: float
+) -> dict[str, dict[str, float]]:
+    if not path.is_file():
+        return {}
+    spec_path = _checkpoint_spec_path(path)
+    if not spec_path.is_file():
+        return {}
+    saved_spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    if saved_spec.get("fingerprint") != _spec_fingerprint(spec, max_missing_fraction):
+        return {}
+    saved = pd.read_csv(path)
+    if "sample_id" not in saved.columns:
+        return {}
+    rows: dict[str, dict[str, float]] = {}
+    for record in saved.to_dict(orient="records"):
+        sample_id = str(record.pop("sample_id"))
+        rows[sample_id] = record
+    return rows
+
+
+def _write_image_checkpoint(
+    path: Path,
+    rows: dict[str, dict[str, float]],
+    spec: FeatureSpec,
+    max_missing_fraction: float,
+) -> None:
+    records = [{"sample_id": sample_id, **features} for sample_id, features in rows.items()]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(records).to_csv(path, index=False)
+    _checkpoint_spec_path(path).write_text(
+        json.dumps(
+            {"fingerprint": _spec_fingerprint(spec, max_missing_fraction)},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def extract_feature_table(
     frame: pd.DataFrame,
     manifest_path: str,
     spec: FeatureSpec,
     max_missing_fraction: float = MAX_MISSING_FRACTION,
     workers: int = 1,
+    image_checkpoint: str | Path | None = None,
 ) -> tuple[pd.DataFrame, int]:
     """Extract features and same-split temporal deltas.
 
@@ -538,6 +611,9 @@ def extract_feature_table(
     clock (``timestamp``, else NASA ``relative_time_s``), then any link that
     crosses ``split`` is dropped before the delta is taken. ``workers`` above
     1 only parallelizes the per-image extract. It does not change the values.
+    ``image_checkpoint``, when set, stores per-image features so a restarted
+    run does not re-read frames that already finished. Temporal deltas are
+    still computed after every frame in this call has image features.
     """
     if "split" not in frame.columns:
         raise LeakageError("feature extraction requires a split column")
@@ -550,13 +626,51 @@ def extract_feature_table(
         (str(resolve_image(manifest_path, str(row["image_path"]))), spec, max_missing_fraction)
         for row in rows_in
     ]
-    if workers == 1:
-        extracted = [_extract_path(task) for task in tasks]
-    else:
-        from concurrent.futures import ThreadPoolExecutor
+    expected = spec.image_feature_names()
+    checkpoint = Path(image_checkpoint) if image_checkpoint else None
+    stored = (
+        _image_checkpoint_rows(checkpoint, spec, max_missing_fraction) if checkpoint else {}
+    )
+    extracted: list[dict[str, float] | None] = [None] * len(rows_in)
+    pending: list[int] = []
+    for index, row in enumerate(rows_in):
+        sample_id = str(row["sample_id"])
+        cached = stored.get(sample_id)
+        if cached is not None and all(name in cached for name in expected):
+            extracted[index] = {name: float(cached[name]) for name in expected}
+        else:
+            pending.append(index)
+    if pending:
+        logger.info("Extracting %s images (%s already cached)", len(pending), len(rows_in) - len(pending))
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            extracted = list(pool.map(_extract_path, tasks))
+        def _finish(index: int) -> tuple[int, dict[str, float]]:
+            return index, _extract_path(tasks[index])
+
+        batch = 200
+        if workers == 1:
+            for start in range(0, len(pending), batch):
+                chunk = pending[start : start + batch]
+                for index in chunk:
+                    _index, features = _finish(index)
+                    extracted[_index] = features
+                    stored[str(rows_in[_index]["sample_id"])] = features
+                if checkpoint:
+                    _write_image_checkpoint(checkpoint, stored, spec, max_missing_fraction)
+                logger.info("Image features %s/%s", min(start + batch, len(pending)), len(pending))
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for start in range(0, len(pending), batch):
+                    chunk = pending[start : start + batch]
+                    for index, features in pool.map(_finish, chunk):
+                        extracted[index] = features
+                        stored[str(rows_in[index]["sample_id"])] = features
+                    if checkpoint:
+                        _write_image_checkpoint(checkpoint, stored, spec, max_missing_fraction)
+                    logger.info("Image features %s/%s", min(start + batch, len(pending)), len(pending))
+    if any(item is None for item in extracted):
+        raise RuntimeError("image feature extraction left a row empty")
     cache: dict[str, tuple[str, dict[str, float]]] = {}
     packed: list[tuple[dict[str, object], dict[str, float]]] = []
     for row, image_features in zip(rows_in, extracted, strict=True):

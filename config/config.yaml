@@ -212,3 +212,11 @@ baselines:
   xgb_max_depth: 3
   xgb_learning_rate: 0.1
   max_iter: 1000
+  # Grouped CV. train folds the training storms only. train_val folds
+  # train and val together and never includes test. The group column stays
+  # intact inside a fold. cv_collapse_rare remaps a stratify label that
+  # sits in fewer groups than n_splits, for fold assignment only.
+  cv_pool: train
+  cv_group_column: storm_id
+  cv_collapse_rare: false
+  cv_assign: stratified
