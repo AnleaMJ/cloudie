@@ -23,6 +23,7 @@ Feature selection calls
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -533,8 +534,38 @@ def _extract_path(task: tuple[str, FeatureSpec, float]) -> dict[str, float]:
     return extract_image_features(load_image(path), spec, max_missing_fraction)
 
 
-def _image_checkpoint_rows(path: Path) -> dict[str, dict[str, float]]:
+def _spec_fingerprint(spec: FeatureSpec, max_missing_fraction: float) -> str:
+    """Identity of the extractor settings stored next to an image checkpoint."""
+    payload = {
+        "calibrated": bool(spec.calibrated),
+        "cold_thresholds": [float(value) for value in spec.cold_thresholds],
+        "radial_bins": int(spec.radial_bins),
+        "eye_radius_fraction": float(spec.eye_radius_fraction),
+        "cdo_outer_fraction": float(spec.cdo_outer_fraction),
+        "eye_contrast_min": float(spec.eye_contrast_min),
+        "dav_radii_fractions": [float(value) for value in spec.dav_radii_fractions],
+        "dav_annulus_width_fraction": float(spec.dav_annulus_width_fraction),
+        "glcm_levels": int(spec.glcm_levels),
+        "glcm_distance": int(spec.glcm_distance),
+        "max_missing_fraction": float(max_missing_fraction),
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
+def _checkpoint_spec_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".spec.json")
+
+
+def _image_checkpoint_rows(
+    path: Path, spec: FeatureSpec, max_missing_fraction: float
+) -> dict[str, dict[str, float]]:
     if not path.is_file():
+        return {}
+    spec_path = _checkpoint_spec_path(path)
+    if not spec_path.is_file():
+        return {}
+    saved_spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    if saved_spec.get("fingerprint") != _spec_fingerprint(spec, max_missing_fraction):
         return {}
     saved = pd.read_csv(path)
     if "sample_id" not in saved.columns:
@@ -546,10 +577,24 @@ def _image_checkpoint_rows(path: Path) -> dict[str, dict[str, float]]:
     return rows
 
 
-def _write_image_checkpoint(path: Path, rows: dict[str, dict[str, float]]) -> None:
+def _write_image_checkpoint(
+    path: Path,
+    rows: dict[str, dict[str, float]],
+    spec: FeatureSpec,
+    max_missing_fraction: float,
+) -> None:
     records = [{"sample_id": sample_id, **features} for sample_id, features in rows.items()]
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(records).to_csv(path, index=False)
+    _checkpoint_spec_path(path).write_text(
+        json.dumps(
+            {"fingerprint": _spec_fingerprint(spec, max_missing_fraction)},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def extract_feature_table(
@@ -583,7 +628,9 @@ def extract_feature_table(
     ]
     expected = spec.image_feature_names()
     checkpoint = Path(image_checkpoint) if image_checkpoint else None
-    stored = _image_checkpoint_rows(checkpoint) if checkpoint else {}
+    stored = (
+        _image_checkpoint_rows(checkpoint, spec, max_missing_fraction) if checkpoint else {}
+    )
     extracted: list[dict[str, float] | None] = [None] * len(rows_in)
     pending: list[int] = []
     for index, row in enumerate(rows_in):
@@ -608,7 +655,7 @@ def extract_feature_table(
                     extracted[_index] = features
                     stored[str(rows_in[_index]["sample_id"])] = features
                 if checkpoint:
-                    _write_image_checkpoint(checkpoint, stored)
+                    _write_image_checkpoint(checkpoint, stored, spec, max_missing_fraction)
                 logger.info("Image features %s/%s", min(start + batch, len(pending)), len(pending))
         else:
             from concurrent.futures import ThreadPoolExecutor
@@ -620,7 +667,7 @@ def extract_feature_table(
                         extracted[index] = features
                         stored[str(rows_in[index]["sample_id"])] = features
                     if checkpoint:
-                        _write_image_checkpoint(checkpoint, stored)
+                        _write_image_checkpoint(checkpoint, stored, spec, max_missing_fraction)
                     logger.info("Image features %s/%s", min(start + batch, len(pending)), len(pending))
     if any(item is None for item in extracted):
         raise RuntimeError("image feature extraction left a row empty")

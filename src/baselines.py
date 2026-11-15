@@ -427,15 +427,16 @@ def round_robin_group_folds(frame: pd.DataFrame, params: dict) -> pd.DataFrame:
     pool = frame.loc[frame["split"].astype(str).isin(["train", "val"])].copy()
     if pool.empty:
         raise BaselineDataError("round_robin folds need train and val rows")
-    storms = pool.groupby(pool["storm_id"].astype(str), as_index=False).agg(
+    storm_ids = pool["storm_id"].astype(str)
+    if bool((pool.groupby(storm_ids)["split"].nunique() > 1).any()):
+        raise LeakageError("a storm is in more than one split")
+    group_ids = pool[column].map(lambda value: str(int(value)))
+    if bool((pool.groupby(group_ids)["split"].nunique() > 1).any()):
+        raise LeakageError("a co-occurrence group is in more than one split")
+    storms = pool.groupby(storm_ids, as_index=False).agg(
         group=(column, "first"),
         split=("split", "first"),
     )
-    if storms.groupby("storm_id")["split"].nunique().max() > 1:
-        raise LeakageError("a storm is in more than one split")
-    per_group = storms.groupby(storms["group"].map(lambda value: str(int(value))))["split"].nunique()
-    if bool((per_group > 1).any()):
-        raise LeakageError("a co-occurrence group is in more than one split")
     groups = sorted({int(value) for value in storms["group"].tolist()})
     order = np.random.default_rng(int(params["seed"])).permutation(len(groups))
     shuffled = [groups[int(index)] for index in order]

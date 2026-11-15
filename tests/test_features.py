@@ -597,3 +597,36 @@ def test_feature_table_passes_through_wind_averaging_and_on_fix(tmp_path: Path) 
     assert dropped == 0
     assert table.loc[0, "wind_averaging"] == "1min"
     assert bool(table.loc[0, "on_fix"]) is True
+
+
+def test_image_checkpoint_ignores_a_different_spec(tmp_path: Path) -> None:
+    np.save(tmp_path / "a.npy", np.full((16, 16), 10.0, dtype=np.float32))
+    frame = pd.DataFrame(
+        [
+            {
+                "sample_id": "a",
+                "image_path": "a.npy",
+                "storm_id": "s",
+                "split": "train",
+                "wind_speed_kt": 40.0,
+                "is_synthetic": True,
+            }
+        ]
+    )
+    checkpoint = tmp_path / "images.csv"
+    spec = _spec()
+    first, _ = extract_feature_table(
+        frame, tmp_path / "manifest.csv", spec, image_checkpoint=checkpoint
+    )
+    cached = pd.read_csv(checkpoint)
+    cached["pixel_mean"] = -123.0
+    cached.to_csv(checkpoint, index=False)
+    reused, _ = extract_feature_table(
+        frame, tmp_path / "manifest.csv", spec, image_checkpoint=checkpoint
+    )
+    assert reused.loc[0, "pixel_mean"] == pytest.approx(-123.0)
+    other = FeatureSpec(cold_thresholds=(1.0, 2.0))
+    fresh, _ = extract_feature_table(
+        frame, tmp_path / "manifest.csv", other, image_checkpoint=checkpoint
+    )
+    assert fresh.loc[0, "pixel_mean"] == pytest.approx(first.loc[0, "pixel_mean"])

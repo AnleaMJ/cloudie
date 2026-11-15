@@ -720,3 +720,20 @@ def test_round_robin_cv_folds_file_matches_seed_42(tmp_path: Path, monkeypatch) 
     assert written["fold"].tolist() == folds["fold"].tolist()
     assert "StratifiedGroupKFold" not in (tmp_path / "baseline_comparison.csv").read_text(encoding="utf-8")
     del tiny
+
+
+def test_round_robin_refuses_a_storm_in_two_splits() -> None:
+    frame = pd.DataFrame(
+        [
+            {"storm_id": "a", "split": "train", "cv_group": "1"},
+            {"storm_id": "a", "split": "val", "cv_group": "1"},
+            {"storm_id": "b", "split": "train", "cv_group": "2"},
+            {"storm_id": "c", "split": "val", "cv_group": "3"},
+            {"storm_id": "d", "split": "test", "cv_group": "4"},
+        ]
+    )
+    params = _params(cv_pool="train_val", cv_group_column="cv_group", cv_assign="round_robin", n_splits=2)[
+        "baselines"
+    ]
+    with pytest.raises(LeakageError, match="more than one split"):
+        round_robin_group_folds(frame, params)
