@@ -298,18 +298,33 @@ def incyde_sets(index, images, rows_train, rows_eval, cfg, known):
     return train, evals, alt, {"mean": mean, "std": std, "source_split": "train"}
 
 
-def cv_folds(index, n_folds: int, seed: int):
-    """Assign train+val cooccurrence groups to folds, balancing frame counts."""
-    pool = index[index["proposed_split"].isin(["train", "val"]) & index["is_original"]]
-    sizes = pool.groupby("cooccurrence_group").size().sample(frac=1.0, random_state=seed)
-    sizes = sizes.sort_values(ascending=False, kind="stable")
-    load = [0] * n_folds
-    fold_of = {}
-    for group, count in sizes.items():
-        k = int(np.argmin(load))
-        fold_of[group] = k
-        load[k] += int(count)
-    return index["cooccurrence_group"].map(fold_of)
+def build_cv_folds(n_folds: int, seed: int) -> pd.DataFrame:
+    """Same rule as ``build_cv_folds`` in PR #35 (``src/incyde.py``): train+val
+    storms from ``storm_split.csv``, ``cooccurrence_group``s sorted, shuffled with
+    ``numpy.random.default_rng(seed).permutation`` and dealt round-robin."""
+    storms = pd.read_csv(REPO / "incyde/audit/storm_split.csv")
+    pool = storms.loc[storms["proposed_split"].isin(["train", "val"])].drop_duplicates("storm_id")
+    groups = sorted({int(g) for g in pool["cooccurrence_group"]})
+    order = np.random.default_rng(int(seed)).permutation(len(groups))
+    group_fold = {groups[int(i)]: k % n_folds for k, i in enumerate(order)}
+    out = pd.DataFrame({"storm_id": pool["storm_id"].astype(str),
+                        "fold": [group_fold[int(g)] for g in pool["cooccurrence_group"]]})
+    return out.sort_values(["fold", "storm_id"]).reset_index(drop=True)
+
+
+def cv_folds(index, n_folds: int, seed: int, folds_csv: Path | None = None):
+    """Fold per row. ``folds_csv`` (storm_id, fold), e.g. SWE's, is used verbatim."""
+    table = pd.read_csv(folds_csv) if folds_csv else build_cv_folds(n_folds, seed)
+    fold_of = dict(zip(table["storm_id"].astype(str), table["fold"].astype(int)))
+    folds = index["storm_id"].astype(str).map(fold_of)
+    pool = index["proposed_split"].isin(["train", "val"])
+    if folds[~pool].notna().any():
+        raise ValueError("cv folds include a test storm")
+    if folds[pool].isna().any():
+        raise ValueError("cv folds omit a train/val storm")
+    if (index[pool].assign(f=folds[pool]).groupby("cooccurrence_group")["f"].nunique() > 1).any():
+        raise ValueError("a cooccurrence_group spans folds")
+    return folds, table
 
 
 # ------------------------------------------------------------- checkpoint
@@ -460,7 +475,8 @@ def cmd_finetune(args, cfg, device):
                   "class_pred_head": [known[i] for i in logits.argmax(1)]}).to_csv(out / "val_predictions.csv", index=False)
     del train, evals, alt
     # 2) storm-grouped CV over train+val, fixed epoch count = best epoch + 1
-    folds = cv_folds(index, int(cfg["cv"]["n_folds"]), seed)
+    folds, fold_table = cv_folds(index, int(cfg["cv"]["n_folds"]), int(cfg["cv"].get("seed", 42)), args.cv_folds_csv)
+    fold_table.to_csv(out / "cv_folds.csv", index=False)
     cv = []
     if not args.skip_cv:
         for k in range(int(cfg["cv"]["n_folds"])):
@@ -506,6 +522,7 @@ def cmd_finetune(args, cfg, device):
         "rows_originals": {s: int((orig & (split == s)).sum()) for s in ("train", "val", "test")},
         "rows_rot_180_train": int(((~orig) & (split == "train")).sum()),
         "storms": {s: int(index.loc[split == s, "storm_id"].nunique()) for s in ("train", "val", "test")},
+        "cv_folds_source": str(args.cv_folds_csv) if args.cv_folds_csv else "built: seed 42, PR #35 rule (cooccurrence groups round-robin)",
         "test_split": "sealed: never loaded for training, model selection or reporting",
     }
     (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
@@ -529,6 +546,7 @@ def main():
     p.add_argument("--no-convert", dest="convert", action="store_false")
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--skip-cv", action="store_true")
+    p.add_argument("--cv-folds-csv", type=Path, default=None, help="storm_id,fold table used verbatim (e.g. SWE's)")
     p.add_argument("--set", action="append", default=[], help="override, e.g. train.lr=0.0005")
     args = p.parse_args()
     cfg = yaml.safe_load(args.config.read_text())
