@@ -16,10 +16,10 @@ frame's flags. Pass --all-frames to write every manifest filename. Columns:
   coincident fix or linearly interpolated in time between the two
   neighbouring usable fixes. Left empty when a position cannot be
   derived without guessing.
-- dist_to_coast_km: geodesic-approximated distance to Natural Earth
+- distance_to_land_km: geodesic-approximated distance to Natural Earth
   10m land (0 when the centre is on or over land). Empty when lat/lon
   are unknown.
-- near_land: true if dist_to_coast_km <= 20 or the centre is over land,
+- near_land: true if distance_to_land_km <= 20 or the centre is over land,
   false if the centre is more than 20 km offshore, unknown if there is
   no position.
 
@@ -326,7 +326,7 @@ def build(args: argparse.Namespace) -> pd.DataFrame:
         land_m,
         transformer,
     )
-    pos_keys = pos_keys.assign(dist_to_coast_km=dist_unique)
+    pos_keys = pos_keys.assign(distance_to_land_km=dist_unique)
     unique = unique.merge(pos_keys, on=["lat", "lon"], how="left")
 
     out = manifest.merge(unique, on=["imd_storm_id", "ts"], how="left")
@@ -334,19 +334,19 @@ def build(args: argparse.Namespace) -> pd.DataFrame:
         raise RuntimeError("internal join dropped frames")
 
     threshold = args.near_land_km
-    known = out["dist_to_coast_km"].notna()
+    known = out["distance_to_land_km"].notna()
     near = pd.Series("unknown", index=out.index, dtype="object")
-    near.loc[known & (out["dist_to_coast_km"] <= threshold)] = "true"
-    near.loc[known & (out["dist_to_coast_km"] > threshold)] = "false"
+    near.loc[known & (out["distance_to_land_km"] <= threshold)] = "true"
+    near.loc[known & (out["distance_to_land_km"] > threshold)] = "false"
     out["near_land"] = near
     out["on_fix"] = out["on_fix"].map(_csv_bool)
     out["lat"] = out["lat"].map(lambda v: "" if pd.isna(v) else f"{v:.4f}")
     out["lon"] = out["lon"].map(lambda v: "" if pd.isna(v) else f"{v:.4f}")
-    out["dist_to_coast_km"] = out["dist_to_coast_km"].map(
+    out["distance_to_land_km"] = out["distance_to_land_km"].map(
         lambda v: "" if pd.isna(v) else f"{v:.2f}"
     )
 
-    cols = ["filename", "on_fix", "lat", "lon", "dist_to_coast_km", "near_land"]
+    cols = ["filename", "on_fix", "lat", "lon", "distance_to_land_km", "near_land"]
     if not args.all_frames:
         if "is_augmented" in manifest.columns:
             keep = manifest["is_augmented"].astype(str).str.lower().isin(["false", "0", ""])

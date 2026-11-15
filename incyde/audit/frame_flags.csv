@@ -1,4 +1,4 @@
-filename,on_fix,lat,lon,dist_to_coast_km,near_land
+filename,on_fix,lat,lon,distance_to_land_km,near_land
 08OCT2013_0830_1.jpg,true,12.0000,96.0000,158.91,false
 08OCT2013_1130_1.jpg,true,12.0000,95.5000,179.60,false
 08OCT2013_1200_1.jpg,false,12.0000,95.4167,170.66,false
