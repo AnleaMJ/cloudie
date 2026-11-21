@@ -15,4 +15,6 @@ reports/*
 *.ckpt
 *.h5
 .streamlit/secrets.toml
+*.egg-info/
 space/bundle/
+docs/PM_HANDOFF.txt
