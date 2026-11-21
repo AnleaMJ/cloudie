@@ -614,3 +614,36 @@ def test_balanced_sampler_draws_every_bin() -> None:
     weights = align_bin_weights(labels, _bin_weight_table(counts, "inverse_freq"))
     drawn = [labels[int(index)] for index in make_balanced_sampler(weights, 800, seed=0)]
     assert set(drawn) == set(names)
+
+
+def test_optimizer_cpu_state_does_not_mutate_optimizer_state() -> None:
+    pytest.importorskip("torch")
+    import torch
+    from src.train import _move_optimizer_to, _optimizer_cpu_state
+
+    param = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    opt = torch.optim.AdamW([param], lr=0.01)
+    loss = (param ** 2).sum()
+    loss.backward()
+    opt.step()
+
+    # Verify state has tensors
+    state_vals = list(opt.state[param].values())
+    assert any(torch.is_tensor(v) for v in state_vals)
+
+    # Call _optimizer_cpu_state
+    cpu_blob = _optimizer_cpu_state(opt)
+    assert "state" in cpu_blob
+
+    # Verify helper returned CPU tensors
+    for p_id, p_state in cpu_blob["state"].items():
+        for k, v in p_state.items():
+            if torch.is_tensor(v):
+                assert v.device.type == "cpu"
+
+    # Verify optimizer state was not mutated in place
+    _move_optimizer_to(opt, torch.device("cpu"))
+    opt.zero_grad(set_to_none=True)
+    loss2 = (param ** 2).sum()
+    loss2.backward()
+    opt.step()

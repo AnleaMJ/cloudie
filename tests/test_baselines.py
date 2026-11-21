@@ -271,8 +271,9 @@ def test_smoke_images_run_the_configured_baselines(tmp_path: Path) -> None:
     assert comparison["quote_as_result"].eq("no").all()
     assert comparison["adt_mae_kt"].isna().all()
     regression = comparison[comparison["task"] == "regression"]
-    assert regression["mae_kt"].notna().all()
-    assert np.isfinite(regression["mae_kt"]).all()
+    scored_regression = regression[regression["fit_notes"] != "not_installed"]
+    assert scored_regression["mae_kt"].notna().all()
+    assert np.isfinite(scored_regression["mae_kt"]).all()
     classification = comparison[comparison["task"] == "classification"]
     scored = classification[classification["fit_notes"] != "not_installed"]
     assert scored["macro_f1"].notna().all()

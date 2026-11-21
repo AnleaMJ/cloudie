@@ -16,10 +16,10 @@ Terminology
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy import stats as sp_stats
 
 
 # ---------------------------------------------------------------------------
@@ -231,8 +231,22 @@ def compute_spearman(
     abs_error = np.abs(y_true - pred_mean)
     if pred_std.std() == 0 or abs_error.std() == 0:
         return 0.0, 1.0
-    result = sp_stats.spearmanr(pred_std, abs_error)
-    return float(result.statistic), float(result.pvalue)
+    try:
+        from scipy import stats as sp_stats
+
+        result = sp_stats.spearmanr(pred_std, abs_error)
+        return float(result.statistic), float(result.pvalue)
+    except ImportError:
+        import pandas as pd
+
+        rho = float(pd.Series(pred_std).corr(pd.Series(abs_error), method="spearman"))
+        n = len(pred_std)
+        if n > 2 and abs(rho) < 1.0:
+            t_stat = rho * np.sqrt((n - 2) / (1.0 - rho**2))
+            pval = float(2.0 * (1.0 - 0.5 * (1.0 + math.erf(abs(t_stat) / np.sqrt(2)))))
+        else:
+            pval = 0.0 if abs(rho) == 1.0 else 1.0
+        return rho, pval
 
 
 # ---------------------------------------------------------------------------
