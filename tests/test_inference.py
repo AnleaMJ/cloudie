@@ -721,3 +721,47 @@ def test_run_checkpoint_reads_artifacts_runs_and_withholds_wind_until_held_out(
     from cloudie.app import NO_TRAINED_MODEL_BANNER as exported
 
     assert exported is NO_TRAINED_MODEL_BANNER
+
+
+def test_run_checkpoint_resolve_finds_runs_prefix_on_hf_hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.inference import RunCheckpoint
+
+    monkeypatch.delenv("CLOUDIE_CHECKPOINT", raising=False)
+    monkeypatch.delenv("CLOUDIE_HF_MODEL_REPO", raising=False)
+    monkeypatch.delenv("CLOUDIE_RUN_ID", raising=False)
+
+    config = _config()
+    run_id = "test-hf-run"
+    config["paths"]["hf_model_repo"] = "Anlea/cloudie-weights"
+    config["paths"]["run_id"] = run_id
+    config["paths"]["checkpoint_name"] = "checkpoint.pt"
+
+    fake_ckpt = tmp_path / "runs" / run_id / "checkpoint.pt"
+    fake_ckpt.parent.mkdir(parents=True, exist_ok=True)
+    fake_ckpt.write_text("fake checkpoint", encoding="utf-8")
+
+    fake_metrics = tmp_path / "runs" / run_id / "metrics.json"
+    fake_metrics.write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+
+    downloaded_files: list[tuple[str, str]] = []
+
+    def fake_download(repo_id: str, filename: str) -> Path:
+        downloaded_files.append((repo_id, filename))
+        if filename == f"{run_id}/checkpoint.pt":
+            raise ValueError("not found at direct prefix")
+        if filename == f"runs/{run_id}/checkpoint.pt":
+            return fake_ckpt
+        if filename == f"runs/{run_id}/metrics.json":
+            return fake_metrics
+        raise ValueError(f"Unknown file {filename}")
+
+    monkeypatch.setattr(RunCheckpoint, "download", fake_download)
+
+    resolved_path, resolved_config = RunCheckpoint.resolve(config)
+
+    assert resolved_path == fake_ckpt
+    assert ("Anlea/cloudie-weights", f"{run_id}/checkpoint.pt") in downloaded_files
+    assert ("Anlea/cloudie-weights", f"runs/{run_id}/checkpoint.pt") in downloaded_files
+    assert ("Anlea/cloudie-weights", f"runs/{run_id}/metrics.json") in downloaded_files
+    assert resolved_config["paths"]["run_id"] == run_id
+
