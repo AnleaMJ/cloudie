@@ -148,9 +148,9 @@ def test_readme_front_matter_is_a_free_cpu_gradio_space() -> None:
     for banned in ("t4-small", "t4-medium", "a10g", "a100", "l4x1", "l40s", "zero-a10g", "rtx-pro"):
         assert banned not in text
     requirements = (ROOT / "space" / "requirements.txt").read_text(encoding="utf-8")
-    assert "https://download.pytorch.org/whl/cpu" in requirements
-    assert "torch==2.9.1+cpu" in requirements
-    assert "torchvision==0.24.1+cpu" in requirements
+    assert "torch==2.9.1" in requirements
+    assert "torchvision==0.24.1" in requirements
+    assert "spaces" in requirements
     assert "gradio" not in requirements.lower()
     assert "cu12" not in requirements and "cuda" not in requirements.lower()
 
