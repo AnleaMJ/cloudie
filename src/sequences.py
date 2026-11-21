@@ -121,6 +121,7 @@ def stack_windows(
     stats: NormStats | None,
     max_missing_fraction: float,
     n_frames: int = N_FRAMES,
+    wind_column: str = "wind_speed_kt",
 ) -> tuple[np.ndarray, np.ndarray, list[str | None], np.ndarray | None]:
     """Return ``(N, 4, C, H, W)`` images and last-frame targets.
 
@@ -153,7 +154,8 @@ def stack_windows(
             )
         images.append(stack_prepared(frames))
         last = _row(indexed, sample_ids[-1])
-        winds.append(float(last["wind_speed_kt"]))
+        target_col = wind_column if wind_column in last and not pd.isna(last[wind_column]) else "wind_speed_kt"
+        winds.append(float(last[target_col]))
         if "_class" in frame.columns and not pd.isna(last["_class"]):
             labels.append(str(last["_class"]))
         else:

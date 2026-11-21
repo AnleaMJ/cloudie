@@ -647,3 +647,43 @@ def test_optimizer_cpu_state_does_not_mutate_optimizer_state() -> None:
     loss2 = (param ** 2).sum()
     loss2.backward()
     opt.step()
+
+
+def test_convlstm_cli_training_smoke_cpu(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    pytest.importorskip("matplotlib")
+    import torch
+
+    from src.make_smoke_data import write_smoke
+    from src.train import run_training
+
+    manifest = write_smoke(tmp_path / "smoke", n_storms=8, frames_per_storm=6, size=16)
+    config = load_config(ROOT / "config" / "config_smoke.yaml")
+    config["data"]["image_size"] = 16
+    config["train"]["epochs"] = 1
+    config["train"]["max_steps"] = 2
+    config["train"]["batch_size"] = 2
+    config["paths"]["manifest"] = str(manifest)
+    config["paths"]["runs"] = str(tmp_path / "runs")
+
+    run_dir = run_training(
+        config,
+        dataset="smoke",
+        model="convlstm",
+        max_steps=2,
+        device="cpu",
+        allow_final_test=True,
+    )
+    metrics = _assert_run_record(run_dir, config["paths"]["checkpoint_name"])
+    assert metrics["model"] == "convlstm"
+    assert metrics["result"] is False
+    assert metrics["quote_as_result"] == "no"
+    assert metrics["val"]["n"] > 0
+
+    checkpoint_path = run_dir / config["paths"]["checkpoint_name"]
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert payload["n_frames"] == 4
+    assert payload["model_name"] == "convlstm"
+    assert payload["hidden"] == int(config["model"]["hidden"])
+    assert payload["is_synthetic"] is True
+    assert payload["present_as_forecast"] is False
