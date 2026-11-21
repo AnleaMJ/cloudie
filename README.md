@@ -16,7 +16,7 @@ All predictions feature Monte Carlo dropout coupled with post-hoc conformal scal
 
 ## Architecture
 
-![Cloudie Architecture Pipeline](docs/assets/architecture_pipeline.svg)
+![Cloudie Architecture Pipeline](docs/assets/architecture_pipeline.png)
 
 Cloudie partitions estimation into two complementary pipelines:
 - **Branch A (Physics Features + Classical Baselines):** Extracts radial brightness-temperature profiles, cold-pixel fractions, warm-eye geometry, simplified deviation-angle variance (DAV), GLCM texture, and Haar wavelets. Fits leakage-free Ridge, Random Forest, and XGBoost regressors and classifiers on training storms only.
