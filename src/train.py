@@ -2190,10 +2190,10 @@ def run_training(
             test_storms = sorted(str(s) for s in groups.get("test", []))
             if val_storms and test_storms:
                 residual_block = compute_residual_quantiles(
-                    val_truth=val_truth,
-                    val_pred=val_pred,
-                    test_truth=test_truth,
-                    test_pred=test_pred,
+                    y_true_val=val_truth,
+                    y_pred_val=val_pred,
+                    y_true_test=test_truth,
+                    y_pred_test=test_pred,
                     val_storms=val_storms,
                     test_storms=test_storms,
                     levels=_LEVELS,
