@@ -852,18 +852,43 @@ def fit_split_normalization(
     groups = storm_ids_by_split(frame)
     if not groups["train"]:
         raise LeakageError("normalization stats may be fit on the train split only")
-    raw_images, _winds, _labels, _size = _load_examples(
-        config, frame, Path(manifest), "train", None, False
-    )
     if uses_sequences(config):
+        raw_images, _winds, _labels, _size = _load_examples(
+            config, frame, Path(manifest), "train", None, False
+        )
         norm_frames = [
             raw_images[index, step]
             for index in range(raw_images.shape[0])
             for step in range(raw_images.shape[1])
         ]
-    else:
-        norm_frames = list(raw_images)
-    return fit_norm_stats(norm_frames, "train")
+        return fit_norm_stats(norm_frames, "train")
+
+    image_size = parse_image_size(config["data"]["image_size"])
+    max_missing = float(config["data"]["max_missing_fraction"])
+    rows = frame[frame["split"] == "train"]
+    if rows.empty:
+        raise LeakageError("normalization stats may be fit on the train split only")
+    manifest_path = Path(manifest)
+    count = 0
+    total = 0.0
+    total_sq = 0.0
+    for row in rows.itertuples(index=False):
+        path = resolve_image(manifest_path, row.image_path)
+        img = prepare_image(load_image(path), image_size, None, max_missing)
+        finite = img[np.isfinite(img)]
+        if finite.size > 0:
+            finite64 = finite.astype(np.float64, copy=False)
+            count += int(finite64.size)
+            total += float(finite64.sum())
+            total_sq += float((finite64 * finite64).sum())
+    if count == 0:
+        raise ValueError("train images have no finite pixels")
+    mean = float(total / count)
+    var = max(0.0, float((total_sq / count) - (mean ** 2)))
+    std = float(np.sqrt(var))
+    if std < 1e-6:
+        std = 1.0
+    return NormStats(mean=mean, std=std, source_split="train")
 
 
 def train(config: dict, manifest_path: str | Path | None = None) -> Path:
