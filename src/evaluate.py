@@ -663,6 +663,277 @@ def residual_quantile_coverage(
     return report
 
 
+def compute_residual_quantiles(
+    y_true_val: np.ndarray,
+    y_pred_val: np.ndarray,
+    y_true_test: np.ndarray,
+    y_pred_test: np.ndarray,
+    val_storms: Sequence[str],
+    test_storms: Sequence[str],
+    *,
+    levels: Sequence[float] = _LEVELS,
+    tolerance: float = _TOLERANCE,
+    is_synthetic: bool = False,
+) -> dict:
+    """Compute held-out residual-quantile intervals matching ConfidenceScore schema."""
+    val_clean = [str(s).strip() for s in val_storms if str(s).strip()]
+    test_clean = [str(s).strip() for s in test_storms if str(s).strip()]
+    if not val_clean:
+        raise ValueError("val_storms must contain at least one storm id")
+    if not test_clean:
+        raise ValueError("test_storms must contain at least one storm id")
+
+    levels_report = residual_quantile_coverage(
+        y_true_val=y_true_val,
+        y_pred_val=y_pred_val,
+        y_true_test=y_true_test,
+        y_pred_test=y_pred_test,
+        levels=levels,
+        tolerance=tolerance,
+    )
+    return {
+        "fit_split": "val",
+        "eval_split": "test",
+        "val_storms": sorted(set(val_clean)),
+        "test_storms": sorted(set(test_clean)),
+        "synthetic": bool(is_synthetic),
+        "levels": levels_report,
+    }
+
+
+def merge_residual_quantiles(
+    metrics: dict,
+    residual_block: dict,
+    *,
+    tolerance: float = _TOLERANCE,
+    levels: Sequence[float] = _LEVELS,
+) -> dict:
+    """Merge residual quantile block into a run's metrics record."""
+    result = dict(metrics)
+    uncertainty = dict(result.get("uncertainty") or {})
+    uncertainty["coverage_tolerance"] = float(tolerance)
+    uncertainty["nominal_levels"] = [float(lvl) for lvl in levels]
+    uncertainty["residual_quantile"] = residual_block
+    result["uncertainty"] = uncertainty
+    result["residual_quantile"] = residual_block
+    if "synthetic" not in result or result.get("synthetic") is None:
+        result["synthetic"] = bool(residual_block.get("synthetic", False))
+    return result
+
+
+def evaluate_run_directory(
+    run_dir: str | Path,
+    *,
+    tolerance: float = _TOLERANCE,
+    levels: Sequence[float] = _LEVELS,
+) -> dict:
+    """Evaluate an existing run directory without retraining.
+
+    Computes held-out residual-quantile intervals (fit on val storms,
+    evaluated on test storms) and merges the resulting block into metrics.json.
+    Exports predictions.npz if not already present.
+    """
+    run_path = Path(run_dir)
+    if not run_path.is_dir():
+        raise FileNotFoundError(f"Run directory not found: {run_path}")
+
+    metrics_file = run_path / "metrics.json"
+    metrics: dict = {}
+    if metrics_file.is_file():
+        try:
+            metrics = json.loads(metrics_file.read_text(encoding="utf-8"))
+        except Exception:
+            metrics = {}
+
+    is_synth = metrics.get("is_synthetic", metrics.get("synthetic", False))
+    if isinstance(is_synth, str):
+        is_synth = is_synth.strip().lower() in ("true", "1", "yes")
+    else:
+        is_synth = bool(is_synth)
+
+    npz_candidates = [
+        run_path / "predictions.npz",
+        run_path / "calibration.npz",
+        run_path / "test_predictions.npz",
+    ]
+    npz_file = next((p for p in npz_candidates if p.is_file()), None)
+
+    y_true_test = None
+    y_pred_test = None
+    mc_samples_test = None
+    y_true_val = None
+    y_pred_val = None
+    mc_samples_val = None
+    val_storms = []
+    test_storms = []
+
+    manifest_file = run_path / "split_manifest.csv"
+    manifest_df = None
+    if manifest_file.is_file():
+        manifest_df = pd.read_csv(manifest_file)
+        if "storm_id" in manifest_df.columns and "split" in manifest_df.columns:
+            val_storms = sorted(manifest_df.loc[manifest_df["split"] == "val", "storm_id"].astype(str).unique())
+            test_storms = sorted(manifest_df.loc[manifest_df["split"] == "test", "storm_id"].astype(str).unique())
+
+    if not val_storms and isinstance(metrics.get("split_storm_ids"), dict):
+        val_storms = sorted(str(s) for s in metrics["split_storm_ids"].get("val", []))
+    if not test_storms and isinstance(metrics.get("split_storm_ids"), dict):
+        test_storms = sorted(str(s) for s in metrics["split_storm_ids"].get("test", []))
+
+    if npz_file is not None:
+        data = dict(np.load(str(npz_file), allow_pickle=True))
+        y_true_test = data.get("y_true_test", data.get("y_test", data.get("y_true")))
+        if y_true_test is not None:
+            y_true_test = np.asarray(y_true_test, dtype=np.float64).ravel()
+
+        y_pred_test = data.get("y_pred_test", data.get("y_pred"))
+        mc_test = data.get("mc_samples_test", data.get("mc_samples"))
+        if mc_test is not None:
+            mc_test = np.asarray(mc_test, dtype=np.float64)
+            if mc_test.ndim == 1 and y_true_test is not None:
+                mc_test = mc_test.reshape(1, -1)
+            elif y_true_test is not None and mc_test.ndim > 1 and mc_test.shape[1] != y_true_test.size and mc_test.shape[0] == y_true_test.size:
+                mc_test = mc_test.T
+            mc_samples_test = mc_test
+            if y_pred_test is None and mc_test.ndim > 1:
+                y_pred_test = np.mean(mc_test, axis=0)
+
+        if y_pred_test is not None:
+            y_pred_test = np.asarray(y_pred_test, dtype=np.float64).ravel()
+
+        y_true_val = data.get("y_true_val", data.get("y_val"))
+        if y_true_val is not None:
+            y_true_val = np.asarray(y_true_val, dtype=np.float64).ravel()
+
+        y_pred_val = data.get("y_pred_val")
+        mc_val = data.get("mc_samples_val")
+        if mc_val is not None:
+            mc_val = np.asarray(mc_val, dtype=np.float64)
+            if mc_val.ndim == 1 and y_true_val is not None:
+                mc_val = mc_val.reshape(1, -1)
+            elif y_true_val is not None and mc_val.ndim > 1 and mc_val.shape[1] != y_true_val.size and mc_val.shape[0] == y_true_val.size:
+                mc_val = mc_val.T
+            mc_samples_val = mc_val
+            if y_pred_val is None and mc_val.ndim > 1:
+                y_pred_val = np.mean(mc_val, axis=0)
+
+        if y_pred_val is not None:
+            y_pred_val = np.asarray(y_pred_val, dtype=np.float64).ravel()
+
+    if y_true_test is None or y_pred_test is None or y_true_val is None or y_pred_val is None:
+        if manifest_df is not None:
+            pred_col = next((c for c in ("y_pred", "pred", "predicted_wind_kt") if c in manifest_df.columns), None)
+            wind_col = next((c for c in ("wind_speed_kt", "target", "wind_kt", "wind_kt_3min") if c in manifest_df.columns), None)
+            if pred_col and wind_col:
+                v_mask = manifest_df["split"].astype(str) == "val"
+                t_mask = manifest_df["split"].astype(str) == "test"
+                y_true_val = manifest_df.loc[v_mask, wind_col].to_numpy(dtype=np.float64)
+                y_pred_val = manifest_df.loc[v_mask, pred_col].to_numpy(dtype=np.float64)
+                y_true_test = manifest_df.loc[t_mask, wind_col].to_numpy(dtype=np.float64)
+                y_pred_test = manifest_df.loc[t_mask, pred_col].to_numpy(dtype=np.float64)
+
+        if y_true_test is None or y_pred_test is None or y_true_val is None or y_pred_val is None:
+            ckpt_name = metrics.get("checkpoint_name", "checkpoint.pt")
+            ckpt_path = run_path / ckpt_name
+            if not ckpt_path.is_file():
+                candidates = list(run_path.glob("*.pt")) + list(run_path.glob("*.joblib"))
+                if candidates:
+                    ckpt_path = candidates[0]
+            if not ckpt_path.is_file():
+                raise FileNotFoundError(
+                    f"Neither predictions (.npz) nor checkpoint (.pt) found in {run_path}"
+                )
+            if manifest_df is None:
+                raise FileNotFoundError(f"split_manifest.csv required for checkpoint inference in {run_path}")
+
+            import yaml
+            from src.train import (
+                PathFrames,
+                _collect_predictions,
+                _path_records,
+                _torch,
+                build_loader,
+                build_net,
+                execution_policy,
+                training_wind_column,
+            )
+
+            torch = _torch()
+            cfg_file = run_path / "resolved_config.yaml"
+            if not cfg_file.is_file():
+                cfg_file = Path("config/config.yaml")
+            resolved = yaml.safe_load(cfg_file.read_text(encoding="utf-8")) if cfg_file.is_file() else {}
+
+            payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            model = build_net(resolved, size_head=payload.get("size_head", False))
+            model.load_state_dict(payload["state_dict"])
+            model.eval()
+
+            wind_column = payload.get("label_column") or training_wind_column(resolved)
+            image_size = int(payload.get("image_size", (resolved.get("data") or {}).get("image_size", 128)))
+            norm_mean = float(payload.get("norm_mean", 0.0))
+            norm_std = float(payload.get("norm_std", 1.0))
+            max_missing = float(payload.get("max_missing_fraction", 0.3))
+            known = list(payload.get("class_names") or (resolved.get("data") or {}).get("imd5_names", []))
+
+            val_records = _path_records(manifest_df, manifest_file, "val", wind_column, None)
+            test_records = _path_records(manifest_df, manifest_file, "test", wind_column, None)
+            val_loader = build_loader(
+                PathFrames(val_records, image_size, norm_mean, norm_std, max_missing, known),
+                batch_size=int((resolved.get("train") or {}).get("batch_size", 32)),
+                shuffle=False,
+                num_workers=0,
+            )
+            test_loader = build_loader(
+                PathFrames(test_records, image_size, norm_mean, norm_std, max_missing, known),
+                batch_size=int((resolved.get("train") or {}).get("batch_size", 32)),
+                shuffle=False,
+                num_workers=0,
+            )
+            policy = execution_policy(resolved, torch.device("cpu"))
+            val_truth, val_pred = _collect_predictions(model, val_loader, torch.device("cpu"), policy)
+            test_truth, test_pred = _collect_predictions(model, test_loader, torch.device("cpu"), policy)
+
+            y_true_val = val_truth
+            y_pred_val = val_pred
+            y_true_test = test_truth
+            y_pred_test = test_pred
+
+    out_npz = run_path / "predictions.npz"
+    if not out_npz.is_file() and y_true_test is not None and y_pred_test is not None:
+        np.savez(
+            out_npz,
+            y_true_test=y_true_test,
+            y_pred_test=y_pred_test,
+            mc_samples_test=mc_samples_test if mc_samples_test is not None else y_pred_test[None, :],
+            y_true_val=y_true_val,
+            y_pred_val=y_pred_val,
+            mc_samples_val=mc_samples_val if mc_samples_val is not None else y_pred_val[None, :],
+        )
+
+    if not val_storms:
+        val_storms = ["val_storm"]
+    if not test_storms:
+        test_storms = ["test_storm"]
+
+    residual_block = compute_residual_quantiles(
+        y_true_val=y_true_val,
+        y_pred_val=y_pred_val,
+        y_true_test=y_true_test,
+        y_pred_test=y_pred_test,
+        val_storms=val_storms,
+        test_storms=test_storms,
+        levels=levels,
+        tolerance=tolerance,
+        is_synthetic=is_synth,
+    )
+
+    merged = merge_residual_quantiles(metrics, residual_block, tolerance=tolerance, levels=levels)
+    merged["synthetic"] = is_synth
+    metrics_file.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    return merged
+
+
 def _positions(frame: pd.DataFrame, split_name: str) -> np.ndarray:
     return np.flatnonzero(frame["split"].astype(str).to_numpy() == split_name)
 
@@ -1162,11 +1433,17 @@ def evaluate(
 def main(argv: list[str] | None = None) -> dict:
     """CLI entry point. Prints paths and the honesty banner, not a score to quote."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help="Path to an existing run directory to evaluate and compute held-out residual quantiles",
+    )
+    parser.add_argument("--config", type=Path, default=None)
     parser.add_argument(
         "--frame",
         type=Path,
-        required=True,
+        default=None,
         help="CSV with storms, winds, y_pred, and features",
     )
     parser.add_argument(
@@ -1175,7 +1452,7 @@ def main(argv: list[str] | None = None) -> dict:
         default=None,
         help="Path used to resolve image_path. Defaults to --frame.",
     )
-    parser.add_argument("--features", nargs="+", required=True)
+    parser.add_argument("--features", nargs="*", default=None)
     parser.add_argument("--prediction-column", default="y_pred")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--levels", nargs="+", type=float, default=list(_LEVELS))
@@ -1192,6 +1469,18 @@ def main(argv: list[str] | None = None) -> dict:
         default="test",
     )
     args = parser.parse_args(argv)
+    if args.run_dir is not None:
+        tol = _TOLERANCE if args.coverage_tolerance is None else float(args.coverage_tolerance)
+        merged = evaluate_run_directory(
+            args.run_dir,
+            tolerance=tol,
+            levels=args.levels,
+        )
+        print(f"Updated metrics.json with held-out residual quantiles in {args.run_dir}")
+        return merged
+
+    if args.config is None or args.frame is None or args.features is None:
+        parser.error("--config, --frame, and --features are required when --run-dir is omitted.")
     config = load_config(args.config)
     table = pd.read_csv(args.frame)
     samples = None if args.samples is None else np.load(args.samples)

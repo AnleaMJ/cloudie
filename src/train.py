@@ -2169,9 +2169,43 @@ def run_training(
             test_raw_truth = np.array([row["raw_wind"] for row in test_records], dtype=np.float64)
         test_metrics = _score_split(test_truth, test_pred, resolved)
         test_raw_metrics = _score_split(test_raw_truth, test_raw_pred, resolved)
+        residual_block = None
+        try:
+            np.savez(
+                run_dir / "predictions.npz",
+                y_true_test=test_truth,
+                y_pred_test=test_pred,
+                mc_samples_test=test_pred[None, :],
+                y_true_val=val_truth,
+                y_pred_val=val_pred,
+                mc_samples_val=val_pred[None, :],
+            )
+            from src.evaluate import (
+                _LEVELS,
+                _TOLERANCE,
+                compute_residual_quantiles,
+            )
+
+            val_storms = sorted(str(s) for s in groups.get("val", []))
+            test_storms = sorted(str(s) for s in groups.get("test", []))
+            if val_storms and test_storms:
+                residual_block = compute_residual_quantiles(
+                    val_truth=val_truth,
+                    val_pred=val_pred,
+                    test_truth=test_truth,
+                    test_pred=test_pred,
+                    val_storms=val_storms,
+                    test_storms=test_storms,
+                    levels=_LEVELS,
+                    tolerance=_TOLERANCE,
+                    is_synthetic=bool(synthetic),
+                )
+        except Exception:
+            residual_block = None
     else:
         test_metrics = {"scored": False, "reason": test_refusal}
         test_raw_metrics = {"scored": False, "reason": test_refusal}
+        residual_block = None
     checkpoint_name = str(resolved["paths"]["checkpoint_name"])
     if not checkpoint_name or checkpoint_name != Path(checkpoint_name).name:
         raise ValueError("paths.checkpoint_name must be a file name, not a path")
@@ -2312,6 +2346,13 @@ def run_training(
 
         metrics["year_holdout_2019"] = YEAR_HOLDOUT_NOTE
         metrics["year_holdout_2019_indicative"] = True
+    if residual_block is not None:
+        from src.evaluate import _LEVELS, _TOLERANCE, merge_residual_quantiles
+
+        metrics = merge_residual_quantiles(
+            metrics, residual_block, tolerance=_TOLERANCE, levels=_LEVELS
+        )
+    metrics["synthetic"] = bool(synthetic)
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
     if synthetic:
         print(SMOKE_BANNER)
