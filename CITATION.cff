@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite it as below."
+title: "Cloudie: Tropical Cyclone Intensity Estimation from Satellite Imagery"
+authors:
+  - family-names: "Jose"
+    given-names: "Anlea Maria"
+date-released: 2026-11-22
+version: "0.2.0"
+url: "https://github.com/AnleaMJ/cloudie"
+repository-code: "https://github.com/AnleaMJ/cloudie"
+license: "MIT"
+type: "software"
+keywords:
+  - "tropical-cyclone"
+  - "satellite-imagery"
+  - "convlstm"
+  - "conformal-prediction"
+  - "uncertainty-quantification"
