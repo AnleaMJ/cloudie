@@ -427,13 +427,13 @@ def round_robin_group_folds(frame: pd.DataFrame, params: dict) -> pd.DataFrame:
     pool = frame.loc[frame["split"].astype(str).isin(["train", "val"])].copy()
     if pool.empty:
         raise BaselineDataError("round_robin folds need train and val rows")
-    storm_ids = pool["storm_id"].astype(str)
-    if bool((pool.groupby(storm_ids)["split"].nunique() > 1).any()):
+    pool["storm_id"] = pool["storm_id"].astype(str)
+    if bool((pool.groupby("storm_id")["split"].nunique() > 1).any()):
         raise LeakageError("a storm is in more than one split")
     group_ids = pool[column].map(lambda value: str(int(value)))
     if bool((pool.groupby(group_ids)["split"].nunique() > 1).any()):
         raise LeakageError("a co-occurrence group is in more than one split")
-    storms = pool.groupby(storm_ids, as_index=False).agg(
+    storms = pool.groupby("storm_id", as_index=False).agg(
         group=(column, "first"),
         split=("split", "first"),
     )

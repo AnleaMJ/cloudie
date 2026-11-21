@@ -193,3 +193,37 @@ flowchart LR
 - **Reporting:** validation and CV only, never presented as a forecast or as
   operational skill. Only about 9% of INCYDE labels sit on a real IMD fix;
   the rest are interpolated, so agreement with labels is not ground truth.
+
+## 7. Dual-Branch Pipeline Overview
+
+The framework provides two complementary modeling tracks, illustrated below:
+
+![Cloudie Dual-Branch Architecture Pipeline](assets/architecture_pipeline.svg)
+
+```mermaid
+flowchart TD
+    subgraph DataPrep ["Data Pipeline &amp; Leakage Audit (src/schema.py, src/splits.py)"]
+        Raw["Raw Infrared Chips (INCYDE / TCIR / NASA)"] --> Split["Storm-Disjoint Splits (storm_wise / chronological / holdout_basin)"]
+        Split --> Norm["Train-Storm Normalization (z-score on finite train pixels)"]
+        Norm --> Audit["6-Point Leakage Audit (null cross-split temporal links)"]
+    end
+
+    Audit --> BranchA["Branch A: Physics Features + Baselines (src/features.py, src/baselines.py)"]
+    Audit --> BranchB["Branch B: Deep ConvLSTM Sequence Model (src/model.py, src/train.py)"]
+
+    subgraph BranchAFlow ["Branch A: Classical Baselines"]
+        BranchA --> Native["Native-Resolution Infrared Image (Center-Aligned)"]
+        Native --> FeatExt["Physics Feature Extraction:<br/>- Pixel statistics &amp; cold fractions (&lt; 200..240K)<br/>- 8 radial profile bins &amp; warm eye contrast<br/>- Simplified Deviation Angle Variance (DAV)<br/>- 16-level GLCM texture &amp; Haar wavelet energy<br/>- Within-storm temporal deltas"]
+        FeatExt --> FeatSel["Train-Storm Feature Selection (Correlation &lt; 0.95 + RF Importance)"]
+        FeatSel --> Models["Baseline Models &amp; Stratified Group K-Fold:<br/>- Reference Persistence (Previous Frame Best-Track)<br/>- Ridge, Linear Regression, KNN, SVR, RF, XGBoost<br/>- 5-Class Categorization with Inner-Fold SMOTE"]
+        Models --> EvalA["Held-Out Storm Evaluation (src/evaluate.py):<br/>- RMSE, MAE, Bias overall &amp; per-class<br/>- 95% Percentile Bootstrap (Storm Resampling)"]
+    end
+
+    subgraph BranchBFlow ["Branch B: Deep Spatiotemporal &amp; Calibration"]
+        BranchB --> Seq["4-Frame Sequence Stacking (B &times; 4 &times; 1 &times; 96 &times; 96)"]
+        Seq --> Backbone["4-Frame ConvLSTM Backbone (or SimpleCNN / ResNet18)"]
+        Backbone --> Heads["Multi-Task Heads:<br/>- Primary Wind Head: Linear &rarr; Knots (Weighted Smooth L1)<br/>- Auxiliary Category Head: Linear &rarr; 5 Logits (CE Loss)"]
+        Heads --> MCDropout["Inference: 20 MC Dropout Passes &rarr; Mean &mu; &amp; Std &sigma;"]
+        MCDropout --> Calibration["Post-Hoc Conformal Calibration (src/calibration.py):<br/>- Validation-fit scaled conformal intervals<br/>- 50%, 80%, 90%, 95% empirical coverage &amp; width<br/>- MACE (Mean Absolute Calibration Error)<br/>- ENCE (Expected Normalized Calibration Error)<br/>- Spearman rank correlation &rho; (|error| vs &sigma;)"]
+    end
+```
