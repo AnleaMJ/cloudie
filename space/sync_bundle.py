@@ -16,6 +16,9 @@ import shutil
 from pathlib import Path
 
 
+DEFAULT_HF_MODEL_REPO = "Anlea/cloudie-weights"
+
+
 class SpaceBundle:
     """Build the directory that is pushed to the Space repository."""
 
@@ -52,7 +55,7 @@ class SpaceBundle:
         del directory
         skipped = set()
         for name in names:
-            if name in SpaceBundle.SKIP_NAMES or name.endswith(".pyc"):
+            if name in SpaceBundle.SKIP_NAMES or name.endswith((".pyc", ".pt", ".pth")):
                 skipped.add(name)
         return skipped
 

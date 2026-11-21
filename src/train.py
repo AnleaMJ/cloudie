@@ -1412,6 +1412,7 @@ def _fit_run(
     reset_peak_memory(device)
     end_epoch = start_epoch if already_stopped else epochs
     for epoch in range(int(start_epoch), int(end_epoch)):
+        epoch_start = time.time()
         model.train()
         _move_optimizer_to(optimizer, device)
         optimizer.zero_grad(set_to_none=True)
@@ -1444,11 +1445,17 @@ def _fit_run(
         val_mae = _split_mae(model, val_loader, device, policy)
         if not np.isfinite(val_mae):
             raise RuntimeError("validation MAE is not finite")
+        train_loss = total / count
+        elapsed = time.time() - epoch_start
+        print(
+            f"epoch {epoch + 1}/{epochs} | train_loss={train_loss:.4f} | val_mae={float(val_mae):.2f} kt | elapsed={elapsed:.1f}s",
+            flush=True,
+        )
         history.append(
             {
                 "epoch": epoch,
                 "step": steps,
-                "train_loss": total / count,
+                "train_loss": train_loss,
                 "val_mae": float(val_mae),
             }
         )

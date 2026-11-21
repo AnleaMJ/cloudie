@@ -59,13 +59,21 @@ from src.inference import (  # noqa: E402
 from src.schema import wind_to_imd5  # noqa: E402
 
 
+DEFAULT_HF_MODEL_REPO = "Anlea/cloudie-weights"
+
+
 class SpaceConfig:
     """The NASA config. Smoke stays a local software check."""
+
+    DEFAULT_REPO = DEFAULT_HF_MODEL_REPO
 
     @staticmethod
     def load(root: Path | None = None) -> dict:
         base = root or SpaceLayout.root()
-        return load_config(base / "config" / "config.yaml")
+        config = load_config(base / "config" / "config.yaml")
+        if not config.get("paths", {}).get("hf_model_repo"):
+            config.setdefault("paths", {})["hf_model_repo"] = SpaceConfig.DEFAULT_REPO
+        return config
 
     @staticmethod
     def uncalibrated(config: dict) -> str:
