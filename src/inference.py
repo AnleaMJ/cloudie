@@ -1219,9 +1219,14 @@ class RunCheckpoint:
         if repo is None:
             return None, config
         prefix = f"{selected}/" if selected else ""
-        downloaded = RunCheckpoint.download(repo, f"{prefix}{name}")
         try:
-            metrics = RunCheckpoint.download(repo, f"{prefix}metrics.json")
+            downloaded = RunCheckpoint.download(repo, f"{prefix}{name}")
+            active_prefix = prefix
+        except ValueError:
+            downloaded = RunCheckpoint.download(repo, f"runs/{prefix}{name}")
+            active_prefix = f"runs/{prefix}"
+        try:
+            metrics = RunCheckpoint.download(repo, f"{active_prefix}metrics.json")
         except ValueError:
             metrics = None
         if metrics is None:
