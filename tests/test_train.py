@@ -687,3 +687,87 @@ def test_convlstm_cli_training_smoke_cpu(tmp_path: Path) -> None:
     assert payload["hidden"] == int(config["model"]["hidden"])
     assert payload["is_synthetic"] is True
     assert payload["present_as_forecast"] is False
+
+
+def test_streaming_fit_split_normalization_matches_fit_norm_stats(tmp_path: Path) -> None:
+    import numpy as np
+    import pandas as pd
+
+    from src.data_loader import load_image
+    from src.preprocessing import fit_norm_stats, prepare_image
+    from src.train import fit_split_normalization
+
+    images_dir = tmp_path / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(42)
+
+    image_paths = []
+    for i in range(4):
+        img = rng.uniform(180.0, 310.0, (32, 32)).astype(np.float32)
+        img[0, i] = np.nan
+        path = images_dir / f"train_{i}.npy"
+        np.save(path, img)
+        image_paths.append(path)
+
+    val_img = np.full((32, 32), 999.0, dtype=np.float32)
+    val_path = images_dir / "val_0.npy"
+    np.save(val_path, val_img)
+
+    rows = [
+        {
+            "sample_id": f"s_tr_{i}",
+            "storm_id": f"STORM_{i // 2}",
+            "split": "train",
+            "image_path": str(path.relative_to(tmp_path)),
+            "wind_speed_kt": 35.0 + i * 5,
+            "_class": "CS",
+            "wind_averaging": "synthetic",
+            "is_synthetic": True,
+        }
+        for i, path in enumerate(image_paths)
+    ]
+    rows.append(
+        {
+            "sample_id": "s_val_0",
+            "storm_id": "STORM_VAL",
+            "split": "val",
+            "image_path": str(val_path.relative_to(tmp_path)),
+            "wind_speed_kt": 80.0,
+            "_class": "SCS",
+            "wind_averaging": "synthetic",
+            "is_synthetic": True,
+        }
+    )
+    frame = pd.DataFrame(rows)
+    manifest = tmp_path / "manifest.csv"
+    frame.to_csv(manifest, index=False)
+
+    config = {
+        "model": {"name": "simple_cnn"},
+        "data": {
+            "image_size": 32,
+            "max_missing_fraction": 0.3,
+            "imd5_names": ["D_DD", "CS", "SCS", "VSCS", "ESCS_SUCS"],
+        },
+    }
+
+    prepared = [
+        prepare_image(load_image(path), 32, None, 0.3)
+        for path in image_paths
+    ]
+    direct_stats = fit_norm_stats(prepared, "train")
+
+    streaming_stats = fit_split_normalization(frame, manifest, config)
+
+    assert streaming_stats.source_split == "train"
+    assert abs(streaming_stats.mean - direct_stats.mean) < 1e-5
+    assert abs(streaming_stats.std - direct_stats.std) < 1e-5
+
+    no_train_frame = frame[frame["split"] != "train"].copy()
+    with pytest.raises(LeakageError, match="train split only"):
+        fit_split_normalization(no_train_frame, manifest, config)
+
+    empty_train_frame = frame.copy()
+    empty_train_frame["split"] = "val"
+    with pytest.raises(LeakageError, match="train split only"):
+        fit_split_normalization(empty_train_frame, manifest, config)
