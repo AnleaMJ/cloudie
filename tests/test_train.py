@@ -277,6 +277,14 @@ def test_smoke_run_writes_the_record_and_loads_in_inference(tmp_path: Path) -> N
         for key in ("mae_kt", "rmse_kt", "bias_kt", "n"):
             assert key in metrics[split_name]
         assert metrics[split_name]["n"] > 0
+    assert (run_dir / "predictions.npz").is_file()
+    assert "uncertainty" in metrics
+    assert "residual_quantile" in metrics["uncertainty"]
+    assert metrics["uncertainty"]["residual_quantile"]["eval_split"] == "test"
+    assert metrics["uncertainty"]["residual_quantile"]["test_storms"]
+    assert metrics["uncertainty"]["residual_quantile"]["synthetic"] is True
+    from src.inference import ConfidenceScore
+    assert ConfidenceScore._held_out_storm_check(metrics) is False
     curve = pd.read_csv(run_dir / "loss_curve.csv")
     assert list(curve.columns) == ["epoch", "step", "train_loss", "val_mae"]
     assert len(curve) >= 1

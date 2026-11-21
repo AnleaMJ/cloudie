@@ -17,4 +17,5 @@ reports/*
 .streamlit/secrets.toml
 *.egg-info/
 space/bundle/
+runs/
 docs/PM_HANDOFF.txt
