@@ -12,7 +12,8 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt
       # h5py only for the TCIR loader tests; they write a tiny local fixture.
-      - run: pip install "h5py>=3.9"
+      - run: pip install "h5py>=3.9" "xgboost>=2.0" "scipy>=1.10"
+      - run: pip install -e .
       - run: pytest
   # One torch job. CPU wheels only. No NASA, TCIR, or TorchGeo download.
   torch:
@@ -22,11 +23,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
       - run: pip install "torch>=2.1" "torchvision>=0.16" --index-url https://download.pytorch.org/whl/cpu
-      - run: pip install "streamlit>=1.33" "gradio==6.31.0"
-      # h5py only so the TCIR training test can read a tiny local fixture.
-      - run: pip install "h5py>=3.9"
+      - run: pip install -r requirements-train.txt
+      - run: pip install "gradio==6.31.0"
+      - run: pip install -e .
       - name: Run model, sequence, training, Streamlit, and Space tests
         run: |
           set -o pipefail

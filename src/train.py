@@ -59,7 +59,7 @@ from src.schema import (
     wind_averaging_seconds,
     wind_to_imd5,
 )
-from src.sequences import N_FRAMES, size_targets_present, stack_windows
+from src.sequences import N_FRAMES, _row, frame_windows, size_targets_present, stack_windows
 from src.splits import (
     LeakageError,
     add_previous_frame_id,
@@ -817,6 +817,9 @@ def _load_examples(
 ):
     image_size = parse_image_size(config["data"]["image_size"])
     max_missing = float(config["data"]["max_missing_fraction"])
+    wind_column = config.get("labels", {}).get("label_column", "wind_speed_kt")
+    if wind_column not in frame.columns:
+        wind_column = "wind_speed_kt"
     if uses_sequences(config):
         images, winds, labels, size = stack_windows(
             frame,
@@ -826,6 +829,7 @@ def _load_examples(
             stats,
             max_missing,
             model_n_frames(config),
+            wind_column=wind_column,
         )
         return images, winds, labels, size if size_head else None
     images, winds, labels = stack_split(
@@ -1006,8 +1010,13 @@ def train(config: dict, manifest_path: str | Path | None = None) -> Path:
 
 LOGGER = logging.getLogger("src.train")
 
-# CLI names. simplecnn is the YAML name simple_cnn. ConvLSTM stays on train().
-_CLI_MODELS = {"simplecnn": "simple_cnn", "simple_cnn": "simple_cnn", "resnet18": "resnet18"}
+# CLI names. simplecnn is the YAML name simple_cnn.
+_CLI_MODELS = {
+    "simplecnn": "simple_cnn",
+    "simple_cnn": "simple_cnn",
+    "resnet18": "resnet18",
+    "convlstm": "convlstm",
+}
 _DATASETS = ("nasa", "tcir", "incyde", "smoke")
 RUN_FILES = (
     "checkpoint",
@@ -1023,7 +1032,7 @@ def canonical_model_name(name: str) -> str:
     """Map the CLI model name onto ``model.name`` in the YAML."""
     key = str(name).strip().lower()
     if key not in _CLI_MODELS:
-        raise ValueError("model must be simplecnn or resnet18")
+        raise ValueError("model must be simplecnn, resnet18, or convlstm")
     return _CLI_MODELS[key]
 
 
@@ -1802,8 +1811,8 @@ def run_training(
         resolved["model"]["name"] = str(saved["model_name"])
     else:
         resolved["model"]["name"] = canonical_model_name(str(resolved["model"]["name"]))
-    if resolved["model"]["name"] not in {"simple_cnn", "resnet18"}:
-        raise ValueError("this entrypoint trains simplecnn or resnet18")
+    if resolved["model"]["name"] not in {"simple_cnn", "resnet18", "convlstm"}:
+        raise ValueError("this entrypoint trains simplecnn, resnet18, or convlstm")
     if saved is not None and str(saved["model_name"]) != str(resolved["model"]["name"]):
         raise RuntimeError(
             "Refusing resume: architecture does not match "
@@ -1911,56 +1920,116 @@ def run_training(
         train_loss_weights = np.ones(len(train_rows), dtype=np.float64)
     else:
         train_loss_weights = align_bin_weights(train_labels, balance["weights"])
-    train_count = int(len(train_rows))
-    train_records = _path_records(
-        labeled,
-        manifest_path,
-        "train",
-        wind_column,
-        training_angles(train_count, seed, dataset_name == "incyde"),
-        train_loss_weights,
-    )
-    val_records = _path_records(labeled, manifest_path, "val", wind_column, None)
-    train_sampler = None
-    shuffle_train = True
-    if balance["balanced_sampling"]:
-        train_sampler = make_balanced_sampler(
-            align_bin_weights(train_labels, balance["sampling_weights"]),
-            len(train_rows),
-            seed,
+    if uses_sequences(resolved):
+        train_images, train_winds, train_labels, train_size = _load_examples(
+            resolved, labeled, manifest_path, "train", stats, size_head
         )
-        shuffle_train = False
-    train_loader = build_loader(
-        PathFrames(train_records, image_size, stats.mean, stats.std, max_missing, known),
-        batch_size=batch_size,
-        shuffle=shuffle_train,
-        num_workers=workers,
-        generator=None if train_sampler is not None else generator,
-        sampler=train_sampler,
-    )
-    val_loader = build_loader(
-        PathFrames(val_records, image_size, stats.mean, stats.std, max_missing, known),
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=workers,
-    )
-    score_test = True
-    test_refusal = None
-    try:
-        assert_test_score_allowed(dataset_name, allow_final_test)
-    except RuntimeError as exc:
-        score_test = False
-        test_refusal = str(exc)
-    test_records = None
-    test_loader = None
-    if score_test:
-        test_records = _path_records(labeled, manifest_path, "test", wind_column, None)
-        test_loader = build_loader(
-            PathFrames(test_records, image_size, stats.mean, stats.std, max_missing, known),
+        val_images, val_winds, val_labels, val_size = _load_examples(
+            resolved, labeled, manifest_path, "val", stats, size_head
+        )
+        if balance["loss_weighting"] == "none":
+            train_loss_weights = np.ones(len(train_winds), dtype=np.float64)
+        else:
+            train_loss_weights = align_bin_weights(train_labels, balance["weights"])
+        val_weight = np.ones(len(val_winds), dtype=np.float64)
+        train_sampler = None
+        shuffle_train = True
+        if balance["balanced_sampling"]:
+            train_sampler = make_balanced_sampler(
+                align_bin_weights(train_labels, balance["sampling_weights"]),
+                len(train_winds),
+                seed,
+            )
+            shuffle_train = False
+        train_loader = build_loader(
+            _dataset(train_images, train_winds, train_labels, known, train_loss_weights, train_size),
+            batch_size=batch_size,
+            shuffle=shuffle_train,
+            num_workers=workers,
+            generator=None if train_sampler is not None else generator,
+            sampler=train_sampler,
+        )
+        val_loader = build_loader(
+            _dataset(val_images, val_winds, val_labels, known, val_weight, val_size),
             batch_size=batch_size,
             shuffle=False,
             num_workers=workers,
         )
+        score_test = True
+        test_refusal = None
+        try:
+            assert_test_score_allowed(dataset_name, allow_final_test)
+        except RuntimeError as exc:
+            score_test = False
+            test_refusal = str(exc)
+        test_records = None
+        test_loader = None
+        if score_test:
+            try:
+                test_images, test_winds, test_labels, test_size = _load_examples(
+                    resolved, labeled, manifest_path, "test", stats, size_head
+                )
+                test_weight = np.ones(len(test_winds), dtype=np.float64)
+                test_loader = build_loader(
+                    _dataset(test_images, test_winds, test_labels, known, test_weight, test_size),
+                    batch_size=batch_size,
+                    shuffle=False,
+                    num_workers=workers,
+                )
+            except Exception as exc:
+                score_test = False
+                test_refusal = str(exc)
+    else:
+        train_count = int(len(train_rows))
+        train_records = _path_records(
+            labeled,
+            manifest_path,
+            "train",
+            wind_column,
+            training_angles(train_count, seed, dataset_name == "incyde"),
+            train_loss_weights,
+        )
+        val_records = _path_records(labeled, manifest_path, "val", wind_column, None)
+        train_sampler = None
+        shuffle_train = True
+        if balance["balanced_sampling"]:
+            train_sampler = make_balanced_sampler(
+                align_bin_weights(train_labels, balance["sampling_weights"]),
+                len(train_rows),
+                seed,
+            )
+            shuffle_train = False
+        train_loader = build_loader(
+            PathFrames(train_records, image_size, stats.mean, stats.std, max_missing, known),
+            batch_size=batch_size,
+            shuffle=shuffle_train,
+            num_workers=workers,
+            generator=None if train_sampler is not None else generator,
+            sampler=train_sampler,
+        )
+        val_loader = build_loader(
+            PathFrames(val_records, image_size, stats.mean, stats.std, max_missing, known),
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=workers,
+        )
+        score_test = True
+        test_refusal = None
+        try:
+            assert_test_score_allowed(dataset_name, allow_final_test)
+        except RuntimeError as exc:
+            score_test = False
+            test_refusal = str(exc)
+        test_records = None
+        test_loader = None
+        if score_test:
+            test_records = _path_records(labeled, manifest_path, "test", wind_column, None)
+            test_loader = build_loader(
+                PathFrames(test_records, image_size, stats.mean, stats.std, max_missing, known),
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=workers,
+            )
     model = build_net(resolved, size_head=size_head)
     if not any(layer.__class__.__name__ == "Dropout" for layer in model.modules()):
         raise RuntimeError("MC-dropout needs a Dropout layer left in the network")
@@ -1985,6 +2054,7 @@ def run_training(
             int(resolved["data"]["channels"]),
             _parity_side(resolved, labeled),
             seed=0,
+            n_frames=model_n_frames(resolved),
         )
         parity = compare_model_parity(
             model,
@@ -2033,16 +2103,38 @@ def run_training(
     if not history:
         raise RuntimeError("training produced no loss curve")
     val_truth, val_pred = _collect_predictions(model, val_loader, torch_device, policy)
-    val_raw_pred = back_converted_prediction(
-        val_pred, np.array([row["scale"] for row in val_records], dtype=np.float64)
-    )
-    val_raw_truth = np.array([row["raw_wind"] for row in val_records], dtype=np.float64)
-    if score_test:
-        test_truth, test_pred = _collect_predictions(model, test_loader, torch_device, policy)
-        test_raw_pred = back_converted_prediction(
-            test_pred, np.array([row["scale"] for row in test_records], dtype=np.float64)
+    if uses_sequences(resolved):
+        val_windows = frame_windows(labeled, "val", model_n_frames(resolved))
+        indexed = labeled.set_index(labeled["sample_id"].astype(str), drop=False)
+        last_rows = [_row(indexed, w[-1]) for w in val_windows]
+        if wind_column == "wind_kt_3min" and "wind_kt_scale" in labeled.columns:
+            val_scales = np.array([float(r.get("wind_kt_scale", 1.0)) for r in last_rows], dtype=np.float64)
+        else:
+            val_scales = np.ones(len(last_rows), dtype=np.float64)
+        val_raw_truth = np.array([float(r["wind_speed_kt"]) for r in last_rows], dtype=np.float64)
+        val_raw_pred = back_converted_prediction(val_pred, val_scales)
+    else:
+        val_raw_pred = back_converted_prediction(
+            val_pred, np.array([row["scale"] for row in val_records], dtype=np.float64)
         )
-        test_raw_truth = np.array([row["raw_wind"] for row in test_records], dtype=np.float64)
+        val_raw_truth = np.array([row["raw_wind"] for row in val_records], dtype=np.float64)
+    if score_test and test_loader is not None:
+        test_truth, test_pred = _collect_predictions(model, test_loader, torch_device, policy)
+        if uses_sequences(resolved):
+            test_windows = frame_windows(labeled, "test", model_n_frames(resolved))
+            indexed = labeled.set_index(labeled["sample_id"].astype(str), drop=False)
+            last_rows = [_row(indexed, w[-1]) for w in test_windows]
+            if wind_column == "wind_kt_3min" and "wind_kt_scale" in labeled.columns:
+                test_scales = np.array([float(r.get("wind_kt_scale", 1.0)) for r in last_rows], dtype=np.float64)
+            else:
+                test_scales = np.ones(len(last_rows), dtype=np.float64)
+            test_raw_truth = np.array([float(r["wind_speed_kt"]) for r in last_rows], dtype=np.float64)
+            test_raw_pred = back_converted_prediction(test_pred, test_scales)
+        else:
+            test_raw_pred = back_converted_prediction(
+                test_pred, np.array([row["scale"] for row in test_records], dtype=np.float64)
+            )
+            test_raw_truth = np.array([row["raw_wind"] for row in test_records], dtype=np.float64)
         test_metrics = _score_split(test_truth, test_pred, resolved)
         test_raw_metrics = _score_split(test_raw_truth, test_raw_pred, resolved)
     else:
@@ -2092,9 +2184,9 @@ def run_training(
         "epoch": int(history[-1]["epoch"]),
         "present_as_forecast": False,
         "honesty": SMOKE_BANNER if synthetic else NOT_A_FORECAST,
-        "n_frames": 1,
-        "size_head": False,
-        "hidden": None,
+        "n_frames": model_n_frames(resolved) if uses_sequences(resolved) else 1,
+        "size_head": size_head,
+        "hidden": int(resolved["model"]["hidden"]) if uses_sequences(resolved) else None,
         "config_hash": digest,
         "seed": seed,
         "dataset": dataset_name,
@@ -2204,7 +2296,7 @@ def main(argv: list[str] | None = None) -> Path:
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--dataset", choices=_DATASETS, default=None)
-    parser.add_argument("--model", choices=("simplecnn", "resnet18"), default=None)
+    parser.add_argument("--model", choices=("simplecnn", "resnet18", "convlstm"), default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--device", choices=("auto", "xpu", "cuda", "cpu"), default=None)
     parser.add_argument("--resume", type=Path, default=None)

@@ -17,7 +17,7 @@ datasets:
 pipeline_tag: image-to-text
 ---
 
-# Cloudie Cyclone Intensity Weights (`AnleaMJ/cloudie-weights`)
+# Cloudie Cyclone Intensity Weights (`Anlea/cloudie-weights`)
 
 Checkpoint archive and run records for **Cloudie**, an academic tropical-cyclone intensity estimation framework from infrared satellite imagery.
 
@@ -42,10 +42,10 @@ Checkpoint archive and run records for **Cloudie**, an academic tropical-cyclone
 
 ## Expected Repository Layout
 
-When mirror runs are published to `AnleaMJ/cloudie-weights`, the repository mirrors the canonical `artifacts/runs/<run_id>/` structure required by `src.inference.RunCheckpoint`:
+When mirror runs are published to `Anlea/cloudie-weights`, the repository mirrors the canonical `artifacts/runs/<run_id>/` structure required by `src.inference.RunCheckpoint`:
 
 ```
-AnleaMJ/cloudie-weights/
+Anlea/cloudie-weights/
 ├── <run_id>/
 │   ├── checkpoint.pt        # Torch model state dict + norm stats + config hash
 │   ├── config.yaml          # Resolved training configuration
@@ -70,7 +70,7 @@ To attach this model weights repository to the Space:
 1. Open the Space settings on Hugging Face (`Anlea/cloudie` &rarr; Settings &rarr; Variables and secrets).
 2. Set the Environment Variable:
    ```env
-   CLOUDIE_HF_MODEL_REPO=AnleaMJ/cloudie-weights
+   CLOUDIE_HF_MODEL_REPO=Anlea/cloudie-weights
    CLOUDIE_RUN_ID=<run_id>
    ```
 3. If the model weights repository is private, add a read-scoped secret:
@@ -90,7 +90,7 @@ from src.config import load_config
 from src.inference import RunCheckpoint, predict_images
 
 # Configure target repository
-os.environ["CLOUDIE_HF_MODEL_REPO"] = "AnleaMJ/cloudie-weights"
+os.environ["CLOUDIE_HF_MODEL_REPO"] = "Anlea/cloudie-weights"
 os.environ["CLOUDIE_RUN_ID"] = "<run_id>"
 
 config = load_config("config/config.yaml")

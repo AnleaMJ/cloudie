@@ -332,14 +332,19 @@ def warn_if_parity_failed(result: dict) -> None:
     print(message)
 
 
-def seeded_parity_batch(batch_size: int, channels: int, side: int, seed: int = 0):
+def seeded_parity_batch(batch_size: int, channels: int, side: int, seed: int = 0, n_frames: int = 1):
     """One fixed CPU batch. The same tensors are copied onto the device."""
     torch_module = _torch()
     generator = torch_module.Generator(device="cpu")
     generator.manual_seed(int(seed))
-    images = torch_module.randn(
-        int(batch_size), int(channels), int(side), int(side), generator=generator
-    )
+    if n_frames > 1:
+        images = torch_module.randn(
+            int(batch_size), int(n_frames), int(channels), int(side), int(side), generator=generator
+        )
+    else:
+        images = torch_module.randn(
+            int(batch_size), int(channels), int(side), int(side), generator=generator
+        )
     winds = torch_module.rand(int(batch_size), 1, generator=generator)
     return images, winds
 
