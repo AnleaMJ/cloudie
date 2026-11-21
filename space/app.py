@@ -59,6 +59,14 @@ from src.inference import (  # noqa: E402
 from src.schema import wind_to_imd5  # noqa: E402
 
 
+try:
+    import spaces
+    _gpu_decorator = spaces.GPU
+except (ImportError, AttributeError):
+    def _gpu_decorator(fn):
+        return fn
+
+
 DEFAULT_HF_MODEL_REPO = "Anlea/cloudie-weights"
 
 
@@ -423,6 +431,7 @@ class SpacePage:
         return SpacePage._from_estimate(loaded, estimate, coastal, preview)
 
     @staticmethod
+    @_gpu_decorator
     def on_click(image, npy_file, sample, latitude, longitude):
         view = SpacePage.view(
             image,
