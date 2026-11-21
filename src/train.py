@@ -1333,10 +1333,13 @@ def _apply_step(optimizer, scaler) -> None:
 def _optimizer_cpu_state(optimizer) -> dict:
     torch = _torch()
     blob = optimizer.state_dict()
-    for state in blob["state"].values():
-        for key, value in list(state.items()):
-            if torch.is_tensor(value):
-                state[key] = value.detach().cpu()
+    cpu_state: dict = {}
+    for param_id, state in blob.get("state", {}).items():
+        cpu_state[param_id] = {
+            key: (value.detach().cpu() if torch.is_tensor(value) else value)
+            for key, value in state.items()
+        }
+    blob["state"] = cpu_state
     return blob
 
 
@@ -1401,6 +1404,7 @@ def _fit_run(
     end_epoch = start_epoch if already_stopped else epochs
     for epoch in range(int(start_epoch), int(end_epoch)):
         model.train()
+        _move_optimizer_to(optimizer, device)
         optimizer.zero_grad(set_to_none=True)
         total = 0.0
         count = 0
