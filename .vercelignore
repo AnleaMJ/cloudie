@@ -1,0 +1,17 @@
+.git
+.venv
+tests/
+notebooks/
+docs/
+data/
+artifacts/
+reports/
+results/
+incyde/
+tcir/
+scripts/
+*.pt
+*.npz
+*.csv
+*.npy
+!cloudie/samples/synthetic_ir.npy
