@@ -32,6 +32,30 @@ NO_TRAINED_MODEL_BANNER = (
     "Not a forecast or warning system. "
     "Best-track labels are noisy, and no survey or smoke number is a result of this project."
 )
+
+
+def research_disclaimer_banner(
+    run_id: str = "",
+    dataset: str = "",
+    model: str = "",
+) -> str:
+    """Research disclaimer banner displayed when a real trained model is available."""
+    details = []
+    if dataset:
+        details.append(f"dataset: {dataset.upper()}")
+    if model:
+        details.append(f"model: {model}")
+    if run_id:
+        details.append(f"run: {run_id}")
+    spec = f" ({', '.join(details)})" if details else ""
+    return (
+        f"Active research prototype{spec}. "
+        "Academic and retrospective evaluation only. "
+        "NOT AN OPERATIONAL FORECAST OR WARNING SYSTEM. "
+        "Best-track labels are noisy and model uncertainty is uncalibrated. "
+        "Do not use for life-safety, emergency planning, navigation, or operational decision-making."
+    )
+
 PAGE_LEAD = "Predict cyclone wind speed and intensity category from an infrared image."
 CONFIDENCE_NOTE = (
     "Confidence mixes the image gate, dropout spread, and a residual-quantile "
@@ -634,6 +658,52 @@ class ConfidenceScore:
         except (KeyError, TypeError, ValueError):
             return False
         return count >= 1
+
+    @staticmethod
+    def _held_out_test_evaluated(record: dict) -> bool:
+        """True when a real run has completed a non-synthetic held-out test evaluation.
+
+        Allows model prediction even when residual-quantile empirical coverage is
+        outside tolerance (in which case the interval is labeled uncalibrated).
+        """
+        if not isinstance(record, dict):
+            return False
+        synthetic = record.get("synthetic", record.get("is_synthetic"))
+        if synthetic in {"yes", "mixed", True}:
+            return False
+
+        block = ConfidenceScore._quantile_block(record)
+        if isinstance(block, dict):
+            if str(block.get("eval_split", "")).strip() != "test":
+                return False
+            storms = block.get("test_storms")
+            if not isinstance(storms, (list, tuple)) or not storms:
+                return False
+            if not all(str(storm).strip() for storm in storms):
+                return False
+            block_syn = record.get("synthetic", block.get("synthetic"))
+            if block_syn in {"yes", "mixed", True}:
+                return False
+            rows = ConfidenceScore._level_rows(block)
+            if rows:
+                chosen = ConfidenceScore._chosen_row(rows)
+                if chosen is not None and chosen.get("eval_split") in (None, "test"):
+                    try:
+                        count = int(float(chosen["n"]))
+                        if count >= 1:
+                            return True
+                    except (KeyError, TypeError, ValueError):
+                        pass
+
+        test_block = record.get("test")
+        if isinstance(test_block, dict) and test_block.get("scored", True) is not False:
+            try:
+                count = int(float(test_block.get("n", 0)))
+                if count >= 1:
+                    return True
+            except (KeyError, TypeError, ValueError):
+                pass
+        return False
 
 
 class IntensityGrouping:
