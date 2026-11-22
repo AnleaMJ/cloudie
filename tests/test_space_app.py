@@ -121,6 +121,25 @@ def _rendered(demo) -> str:
                     chunks.append(choice)
                 elif isinstance(choice, (list, tuple)):
                     chunks.extend(str(item) for item in choice)
+    config = getattr(demo, "config", None)
+    if isinstance(config, dict):
+        for component in config.get("components", []):
+            if not isinstance(component, dict):
+                continue
+            props = component.get("props", {})
+            if not isinstance(props, dict):
+                continue
+            for key in ("value", "label", "info"):
+                value = props.get(key)
+                if isinstance(value, str):
+                    chunks.append(value)
+            choices = props.get("choices")
+            if isinstance(choices, (list, tuple)):
+                for choice in choices:
+                    if isinstance(choice, str):
+                        chunks.append(choice)
+                    elif isinstance(choice, (list, tuple)):
+                        chunks.extend(str(item) for item in choice)
     return "\n".join(chunks)
 
 
