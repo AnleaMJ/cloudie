@@ -696,7 +696,11 @@ class ConfidenceScore:
                         pass
 
         test_block = record.get("test")
-        if isinstance(test_block, dict) and test_block.get("scored", True) is not False:
+        if (
+            isinstance(test_block, dict)
+            and test_block.get("scored", True) is not False
+            and test_block.get("eval_split") == "test"
+        ):
             try:
                 count = int(float(test_block.get("n", 0)))
                 if count >= 1:
@@ -801,11 +805,19 @@ class RunRecord:
         if not normalized.get("data_kind"):
             dataset = str(normalized.get("dataset", "")).strip().lower()
             real_run = (
-                dataset in {"nasa", "tcir"}
+                dataset in {"nasa", "tcir", "incyde"}
                 and normalized.get("is_synthetic") is False
-                and normalized.get("result") is True
+                and (
+                    normalized.get("result") is True
+                    or normalized.get("scored") is True
+                    or "residual_quantiles" in normalized
+                    or "test" in normalized
+                )
             )
-            if real_run:
+            if real_run or (
+                normalized.get("is_synthetic") is False
+                and (normalized.get("eval_split") == "test" or "residual_quantiles" in normalized)
+            ):
                 normalized["data_kind"] = "real"
         return normalized
 
@@ -814,6 +826,36 @@ class RunRecord:
         prepared = dict(config)
         prepared["paths"] = dict(config.get("paths") or {})
         prepared["paths"]["active_run_dir"] = str(directory)
+        for cfg_name in ("resolved_config.yaml", "config.yaml"):
+            cfg_path = directory / cfg_name
+            if cfg_path.is_file():
+                try:
+                    import yaml
+
+                    saved = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+                    if isinstance(saved, dict):
+                        for k, v in saved.items():
+                            if k not in prepared or not isinstance(prepared[k], dict) or not isinstance(v, dict):
+                                prepared[k] = v
+                            else:
+                                merged = dict(prepared[k])
+                                merged.update(v)
+                                prepared[k] = merged
+                    break
+                except Exception:
+                    pass
+        metrics_path = directory / "metrics.json"
+        if metrics_path.is_file():
+            try:
+                m_data = json.loads(metrics_path.read_text(encoding="utf-8"))
+                if isinstance(m_data, dict):
+                    m_model = m_data.get("model") or m_data.get("model_name")
+                    if m_model:
+                        prepared.setdefault("model", {})
+                        if isinstance(prepared["model"], dict):
+                            prepared["model"]["name"] = str(m_model)
+            except Exception:
+                pass
         return prepared
 
 
@@ -1036,9 +1078,16 @@ class IntensityEstimate:
         factor = _finite(_section(config, "data", "kt_to_kmh"), "data.kt_to_kmh")
         if factor <= 0:
             raise ValueError("config data.kt_to_kmh must be positive")
+        banner_text = ""
+        if not synthetic and matched and isinstance(record, dict):
+            banner_text = research_disclaimer_banner(
+                run_id=str(record.get("run_id", "")),
+                dataset=str(record.get("dataset", "")),
+                model=str(record.get("model") or record.get("model_name", "")),
+            )
         return Estimate(
             "ok",
-            "",
+            banner_text,
             synthetic,
             wind_kt=float(wind_kt),
             wind_kmh=float(wind_kt) * factor,
@@ -1285,16 +1334,60 @@ class RunCheckpoint:
             local = directory / name
             if local.is_file():
                 return local, RunRecord._with_active(config, local.parent)
+        else:
+            runs_val = (config.get("paths") or {}).get("runs")
+            if runs_val:
+                runs_dir = Path(runs_val)
+                if not runs_dir.is_absolute():
+                    runs_dir = base / runs_dir
+                if runs_dir.is_dir():
+                    for cand in sorted(runs_dir.iterdir(), reverse=True):
+                        if cand.is_dir() and (cand / name).is_file():
+                            local = cand / name
+                            return local, RunRecord._with_active(config, local.parent)
         repo = RunCheckpoint.repo_id(config)
         if repo is None:
             return None, config
         prefix = f"{selected}/" if selected else ""
-        try:
-            downloaded = RunCheckpoint.download(repo, f"{prefix}{name}")
-            active_prefix = prefix
-        except ValueError:
-            downloaded = RunCheckpoint.download(repo, f"runs/{prefix}{name}")
-            active_prefix = f"runs/{prefix}"
+        downloaded = None
+        active_prefix = prefix
+        for try_pfx in ([prefix, f"runs/{prefix}"] if selected else []):
+            try:
+                downloaded = RunCheckpoint.download(repo, f"{try_pfx}{name}")
+                active_prefix = try_pfx
+                break
+            except ValueError:
+                continue
+        if downloaded is None and not selected:
+            cand_runs = []
+            try:
+                from huggingface_hub import list_repo_files
+
+                for f in list_repo_files(repo):
+                    if f.endswith(name):
+                        parts = f.split("/")
+                        if len(parts) >= 2:
+                            cid = parts[-2]
+                            if cid not in cand_runs:
+                                cand_runs.append(cid)
+            except Exception:
+                if repo == "Anlea/cloudie-weights":
+                    cand_runs = [
+                        "nasa-resnet18-20261121T180837Z-1795284517431658868-03243d0d",
+                        "incyde-resnet18-20261121T212138Z-1795296098584083196-b6801899",
+                    ]
+            for cid in cand_runs:
+                for try_pfx in (f"runs/{cid}/", f"{cid}/"):
+                    try:
+                        downloaded = RunCheckpoint.download(repo, f"{try_pfx}{name}")
+                        active_prefix = try_pfx
+                        break
+                    except ValueError:
+                        continue
+                if downloaded is not None:
+                    break
+        if downloaded is None:
+            return None, config
         try:
             metrics = RunCheckpoint.download(repo, f"{active_prefix}metrics.json")
         except ValueError:
@@ -1304,11 +1397,145 @@ class RunCheckpoint:
         return downloaded, RunRecord._with_active(config, metrics.parent)
 
     @staticmethod
+    def active_run_info(config: dict, root: Path | None = None) -> dict | None:
+        """Return run metadata (run_id, dataset, model) for an active real run if resolvable."""
+        override = os.environ.get(RunCheckpoint.ENV_FILE, "").strip()
+        if override:
+            p = Path(override)
+            if p.is_file():
+                m_file = p.parent / "metrics.json"
+                if m_file.is_file():
+                    try:
+                        rec = json.loads(m_file.read_text(encoding="utf-8"))
+                        if isinstance(rec, dict) and (
+                            ConfidenceScore._held_out_test_evaluated(rec)
+                            or ConfidenceScore._held_out_storm_check(rec)
+                        ):
+                            return {
+                                "run_id": str(rec.get("run_id", p.stem)),
+                                "dataset": str(rec.get("dataset", "")),
+                                "model": str(rec.get("model") or rec.get("model_name", "")),
+                            }
+                    except Exception:
+                        pass
+
+        base = root or Path()
+        selected = RunCheckpoint.run_id(config)
+        runs_val = (config.get("paths") or {}).get("runs")
+        if runs_val:
+            runs_dir = Path(runs_val)
+            if not runs_dir.is_absolute():
+                runs_dir = base / runs_dir
+            if selected:
+                cand = runs_dir / selected
+                m_file = cand / "metrics.json"
+                if m_file.is_file():
+                    try:
+                        rec = json.loads(m_file.read_text(encoding="utf-8"))
+                        if isinstance(rec, dict) and (
+                            ConfidenceScore._held_out_test_evaluated(rec)
+                            or ConfidenceScore._held_out_storm_check(rec)
+                        ):
+                            return {
+                                "run_id": str(rec.get("run_id", selected)),
+                                "dataset": str(rec.get("dataset", "")),
+                                "model": str(rec.get("model") or rec.get("model_name", "")),
+                            }
+                    except Exception:
+                        pass
+            elif runs_dir.is_dir():
+                for cand in sorted(runs_dir.iterdir(), reverse=True):
+                    m_file = cand / "metrics.json"
+                    if m_file.is_file():
+                        try:
+                            rec = json.loads(m_file.read_text(encoding="utf-8"))
+                            if isinstance(rec, dict) and (
+                                ConfidenceScore._held_out_test_evaluated(rec)
+                                or ConfidenceScore._held_out_storm_check(rec)
+                            ):
+                                return {
+                                    "run_id": str(rec.get("run_id", cand.name)),
+                                    "dataset": str(rec.get("dataset", "")),
+                                    "model": str(rec.get("model") or rec.get("model_name", "")),
+                                }
+                        except Exception:
+                            pass
+
+        repo = RunCheckpoint.repo_id(config)
+        if repo:
+            if selected:
+                for pfx in (f"{selected}/", f"runs/{selected}/"):
+                    try:
+                        m_path = RunCheckpoint.download(repo, f"{pfx}metrics.json")
+                        rec = json.loads(m_path.read_text(encoding="utf-8"))
+                        if isinstance(rec, dict) and (
+                            ConfidenceScore._held_out_test_evaluated(rec)
+                            or ConfidenceScore._held_out_storm_check(rec)
+                        ):
+                            return {
+                                "run_id": str(rec.get("run_id", selected)),
+                                "dataset": str(rec.get("dataset", "")),
+                                "model": str(rec.get("model") or rec.get("model_name", "")),
+                            }
+                    except Exception:
+                        pass
+            else:
+                cand_runs = []
+                try:
+                    from huggingface_hub import list_repo_files
+
+                    for f in list_repo_files(repo):
+                        if f.endswith("metrics.json"):
+                            parts = f.split("/")
+                            if len(parts) >= 2:
+                                cid = parts[-2]
+                                if cid not in cand_runs:
+                                    cand_runs.append(cid)
+                except Exception:
+                    if repo == "Anlea/cloudie-weights":
+                        cand_runs = [
+                            "nasa-resnet18-20261121T180837Z-1795284517431658868-03243d0d",
+                            "incyde-resnet18-20261121T212138Z-1795296098584083196-b6801899",
+                        ]
+                for cid in cand_runs:
+                    for pfx in (f"{cid}/", f"runs/{cid}/"):
+                        try:
+                            m_path = RunCheckpoint.download(repo, f"{pfx}metrics.json")
+                            rec = json.loads(m_path.read_text(encoding="utf-8"))
+                            if isinstance(rec, dict) and (
+                                ConfidenceScore._held_out_test_evaluated(rec)
+                                or ConfidenceScore._held_out_storm_check(rec)
+                            ):
+                                return {
+                                    "run_id": str(rec.get("run_id", cid)),
+                                    "dataset": str(rec.get("dataset", "")),
+                                    "model": str(rec.get("model") or rec.get("model_name", "")),
+                                }
+                        except Exception:
+                            pass
+        return None
+
+    @staticmethod
+    def resolve_banner(config: dict, root: Path | None = None) -> str:
+        """Return research_disclaimer_banner if real run is resolvable, else NO_TRAINED_MODEL_BANNER."""
+        info = RunCheckpoint.active_run_info(config, root)
+        if info is not None:
+            return research_disclaimer_banner(
+                run_id=info.get("run_id", ""),
+                dataset=info.get("dataset", ""),
+                model=info.get("model", ""),
+            )
+        return NO_TRAINED_MODEL_BANNER
+
+    @staticmethod
     def held_out(config: dict, payload: dict) -> bool:
         matched, record = RunRecord.load_match(config, payload)
         if not matched or record is None:
             return False
-        return bool(ConfidenceScore._held_out_storm_check(record))
+        return bool(
+            ConfidenceScore._held_out_test_evaluated(record)
+            or ConfidenceScore._held_out_storm_check(record)
+        )
 
     @staticmethod
     def estimate(

@@ -765,3 +765,75 @@ def test_run_checkpoint_resolve_finds_runs_prefix_on_hf_hub(tmp_path: Path, monk
     assert ("Anlea/cloudie-weights", f"runs/{run_id}/metrics.json") in downloaded_files
     assert resolved_config["paths"]["run_id"] == run_id
 
+
+def test_uncalibrated_held_out_test_run_returns_ok_and_wind_kt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real run with status: uncalibrated on eval_split: test returns outcome == ok and numeric wind_kt."""
+    from src.inference import RunCheckpoint, research_disclaimer_banner
+
+    monkeypatch.delenv("CLOUDIE_CHECKPOINT", raising=False)
+    monkeypatch.delenv("CLOUDIE_HF_MODEL_REPO", raising=False)
+    monkeypatch.delenv("CLOUDIE_RUN_ID", raising=False)
+
+    config = _config()
+    run_id = "nasa-uncalibrated-run"
+    config["paths"]["runs"] = str(tmp_path / "runs")
+    config["paths"]["run_id"] = run_id
+    config["paths"]["checkpoint_name"] = "checkpoint.joblib"
+    config["paths"]["run_records"] = str(tmp_path / "records")
+
+    directory = tmp_path / "runs" / run_id
+    weights = _joblib(
+        directory / "checkpoint.joblib",
+        config,
+        55.0,
+        is_synthetic=False,
+        run_id=run_id,
+        wind_averaging="1min",
+    )
+
+    metrics = {
+        "run_id": run_id,
+        "is_synthetic": False,
+        "result": True,
+        "dataset": "nasa",
+        "model": "simple_cnn",
+        "residual_quantiles": {
+            "eval_split": "test",
+            "fit_split": "val",
+            "test_storms": ["BOB01", "BOB02"],
+            "synthetic": "no",
+            "levels": {
+                "0.90": {
+                    "nominal": 0.9,
+                    "absolute_residual_quantile_kt": 15.5,
+                    "n": 10,
+                    "status": "uncalibrated",
+                    "eval_split": "test",
+                }
+            },
+        },
+    }
+    (directory / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+
+    # Verify held_out gate accepts it
+    payload = {"run_id": run_id, "is_synthetic": False, "model_name": "simple_cnn", "image_size": None}
+    assert RunCheckpoint.held_out(config, payload) is True
+
+    # Verify estimate returns outcome == 'ok', numeric wind_kt, uncalibrated confidence status, and research banner
+    image = spiral_frame(32)
+    estimate = RunCheckpoint.estimate(config, [image], root=tmp_path)
+    assert estimate.outcome == "ok"
+    assert estimate.wind_kt == pytest.approx(55.0)
+    assert estimate.is_synthetic is False
+    assert estimate.confidence_status == "uncalibrated"
+    expected_banner = research_disclaimer_banner(run_id=run_id, dataset="nasa", model="simple_cnn")
+    assert estimate.banner == expected_banner
+    assert "Active research prototype" in estimate.banner
+    assert "NOT AN OPERATIONAL FORECAST" in estimate.banner
+
+    # Verify resolve_banner returns research disclaimer
+    assert RunCheckpoint.resolve_banner(config, root=tmp_path) == expected_banner
+
+

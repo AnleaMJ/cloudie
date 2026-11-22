@@ -55,6 +55,7 @@ from src.inference import (  # noqa: E402
     SCALE_NOTE,
     CoastalContext,
     RunCheckpoint,
+    research_disclaimer_banner,
 )
 from src.schema import wind_to_imd5  # noqa: E402
 
@@ -266,11 +267,12 @@ class SpacePage:
     ASK_FOR_FRAME = "Add an infrared frame, then predict intensity."
 
     @staticmethod
-    def idle(config: dict | None = None) -> SpaceView:
+    def idle(config: dict | None = None, banner: str | None = None) -> SpaceView:
         loaded = config or SpaceConfig.load()
         uncalibrated = SpaceConfig.uncalibrated(loaded)
+        active_banner = banner or SpaceApp.resolve_banner(loaded)
         return SpaceView(
-            permanent_banner=NO_TRAINED_MODEL_BANNER,
+            permanent_banner=active_banner,
             status="",
             wind="—",
             category="—",
@@ -283,10 +285,18 @@ class SpacePage:
         )
 
     @staticmethod
-    def _blank(config: dict, status: str, coastal: str, preview, *, show_wind: bool = False) -> SpaceView:
-        idle = SpacePage.idle(config)
+    def _blank(
+        config: dict,
+        status: str,
+        coastal: str,
+        preview,
+        *,
+        show_wind: bool = False,
+        banner: str | None = None,
+    ) -> SpaceView:
+        idle = SpacePage.idle(config, banner=banner)
         return SpaceView(
-            permanent_banner=NO_TRAINED_MODEL_BANNER,
+            permanent_banner=idle.permanent_banner,
             status=status,
             wind=idle.wind,
             category=idle.category,
@@ -319,7 +329,13 @@ class SpacePage:
         return SpacePage.LABELS.get(code, code)
 
     @staticmethod
-    def _from_estimate(config: dict, estimate, coastal: str, preview) -> SpaceView:
+    def _from_estimate(
+        config: dict,
+        estimate,
+        coastal: str,
+        preview,
+        banner: str | None = None,
+    ) -> SpaceView:
         uncalibrated = SpaceConfig.uncalibrated(config)
         show = estimate.outcome == "ok" and estimate.wind_kt is not None
         status_bits = []
@@ -333,9 +349,17 @@ class SpacePage:
             status_bits.append(str(estimate.banner))
         grouping = str(estimate.grouping_note or config["data"]["grouping_note"]).strip()
         grouping = f"{grouping} This is the project's own grouping, not an official IMD class."
+
+        active_banner = banner
+        if active_banner is None:
+            if getattr(estimate, "matched_run", False) and not getattr(estimate, "is_synthetic", True):
+                active_banner = estimate.banner or SpaceApp.resolve_banner(config)
+            else:
+                active_banner = SpaceApp.resolve_banner(config)
+
         if not show:
             return SpaceView(
-                permanent_banner=NO_TRAINED_MODEL_BANNER,
+                permanent_banner=active_banner,
                 status="\n".join(bit for bit in status_bits if bit),
                 wind="—",
                 category="—",
@@ -359,7 +383,7 @@ class SpacePage:
                 f"{label}. {uncalibrated}. No numeric range is shown. {CONFIDENCE_NOTE}"
             )
         return SpaceView(
-            permanent_banner=NO_TRAINED_MODEL_BANNER,
+            permanent_banner=active_banner,
             status="\n".join(bit for bit in status_bits if bit),
             wind=wind,
             category=SpacePage._category(config, estimate),
@@ -459,11 +483,20 @@ class SpaceApp:
     """
 
     @staticmethod
+    def resolve_banner(config: dict | None = None, root: Path | None = None) -> str:
+        loaded = config or SpaceConfig.load(root)
+        try:
+            return RunCheckpoint.resolve_banner(loaded, root)
+        except Exception:
+            return NO_TRAINED_MODEL_BANNER
+
+    @staticmethod
     def build():
         import gradio as gr
 
         config = SpaceConfig.load()
-        idle = SpacePage.idle(config)
+        banner = SpaceApp.resolve_banner(config)
+        idle = SpacePage.idle(config, banner=banner)
         disclaimer = str(config["predict"]["operational_disclaimer"]).strip()
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -474,7 +507,7 @@ class SpaceApp:
             with gr.Blocks(title="Cloudie", theme=gr.themes.Soft(), css=SpaceApp.CSS) as demo:
                 gr.Markdown("# Cloudie")
                 gr.Markdown(PAGE_LEAD)
-                gr.Markdown(NO_TRAINED_MODEL_BANNER, elem_id="no-trained-model-banner")
+                gr.Markdown(banner, elem_id="no-trained-model-banner")
                 gr.Markdown(SCALE_NOTE)
                 gr.Markdown(disclaimer)
                 gr.Markdown(CONFIDENCE_NOTE)
@@ -550,7 +583,10 @@ class SpaceApp:
         return demo
 
 
-demo = SpaceApp.build()
+try:
+    demo = SpaceApp.build()
+except (ImportError, ModuleNotFoundError):
+    demo = None
 
 
 if __name__ == "__main__":
