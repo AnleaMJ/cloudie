@@ -949,3 +949,69 @@ def test_hub_listing_failure_uses_the_checkpoint_name(tmp_path: Path, monkeypatc
         ("Anlea/cloudie-weights", "metrics.json"),
     ]
 
+
+def test_hub_discovery_does_not_treat_runs_as_a_run_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``runs/checkpoint.pt`` stays the generic fallback and does not hide a real run."""
+    from src.inference import RunCheckpoint
+
+    monkeypatch.delenv("CLOUDIE_CHECKPOINT", raising=False)
+    monkeypatch.delenv("CLOUDIE_HF_MODEL_REPO", raising=False)
+    monkeypatch.delenv("CLOUDIE_RUN_ID", raising=False)
+
+    config = _config()
+    run_id = "listed-run"
+    config["paths"]["hf_model_repo"] = "Anlea/cloudie-weights"
+    config["paths"]["run_id"] = None
+    config["paths"]["runs"] = str(tmp_path / "no-local-runs")
+    config["paths"]["checkpoint_name"] = "checkpoint.pt"
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_text("checkpoint", encoding="utf-8")
+    generic = tmp_path / "generic.pt"
+    generic.write_text("generic", encoding="utf-8")
+    metrics = tmp_path / "metrics.json"
+    metrics.write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    calls: list[tuple[str, str]] = []
+
+    def fake_list(_repo_id: str) -> list[str]:
+        return [
+            "runs/checkpoint.pt",
+            "runs/metrics.json",
+            f"runs/{run_id}/checkpoint.pt",
+            f"runs/{run_id}/metrics.json",
+        ]
+
+    def fake_download(repo_id: str, filename: str) -> Path:
+        calls.append((repo_id, filename))
+        if filename == f"runs/{run_id}/checkpoint.pt":
+            return checkpoint
+        if filename == f"runs/{run_id}/metrics.json":
+            return metrics
+        if filename == "runs/checkpoint.pt":
+            return generic
+        raise ValueError(filename)
+
+    monkeypatch.setattr(RunCheckpoint, "list_files", fake_list)
+    monkeypatch.setattr(RunCheckpoint, "download", fake_download)
+    resolved, prepared = RunCheckpoint.resolve(config, root=tmp_path)
+    assert resolved == checkpoint
+    assert calls == [
+        ("Anlea/cloudie-weights", f"runs/{run_id}/checkpoint.pt"),
+        ("Anlea/cloudie-weights", f"runs/{run_id}/metrics.json"),
+    ]
+    assert prepared["paths"]["active_run_dir"] == str(metrics.parent)
+
+    calls.clear()
+
+    def generic_only(_repo_id: str) -> list[str]:
+        return ["runs/checkpoint.pt", "runs/metrics.json"]
+
+    monkeypatch.setattr(RunCheckpoint, "list_files", generic_only)
+    resolved, _prepared = RunCheckpoint.resolve(config, root=tmp_path)
+    assert resolved == generic
+    assert calls == [
+        ("Anlea/cloudie-weights", "checkpoint.pt"),
+        ("Anlea/cloudie-weights", "runs/checkpoint.pt"),
+        ("Anlea/cloudie-weights", "runs/metrics.json"),
+    ]
