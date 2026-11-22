@@ -509,3 +509,79 @@ def test_hub_real_checkpoint_waits_for_the_held_out_record(
     assert shown.wind.startswith("40.0 kt")
     assert shown.interval == "—"
     assert "uncalibrated" in shown.interval_note
+
+
+def test_space_app_resolve_banner_dynamic(tmp_path: Path) -> None:
+    """SpaceApp.resolve_banner returns research disclaimer when real run exists, else NO_TRAINED_MODEL_BANNER."""
+    from cloudie.app import NO_TRAINED_MODEL_BANNER
+    from space.app import SpaceApp, SpacePage
+    from src.inference import research_disclaimer_banner
+
+    # 1. No checkpoint: returns NO_TRAINED_MODEL_BANNER
+    config = _isolated(_config(), tmp_path)
+    assert SpaceApp.resolve_banner(config, root=tmp_path) == NO_TRAINED_MODEL_BANNER
+    idle = SpacePage.idle(config)
+    assert idle.permanent_banner == NO_TRAINED_MODEL_BANNER
+
+    # 2. Real evaluated run present: returns research_disclaimer_banner
+    run_id = "nasa-real-run"
+    config["paths"]["runs"] = str(tmp_path / "runs")
+    config["paths"]["run_id"] = run_id
+    config["paths"]["checkpoint_name"] = "checkpoint.joblib"
+    run_dir = tmp_path / "runs" / run_id
+    weights = _joblib(
+        run_dir / "checkpoint.joblib",
+        config,
+        48.0,
+        is_synthetic=False,
+        run_id=run_id,
+        wind_averaging="1min",
+    )
+    metrics = {
+        "run_id": run_id,
+        "is_synthetic": False,
+        "result": True,
+        "dataset": "nasa",
+        "model": "simple_cnn",
+        "residual_quantiles": {
+            "eval_split": "test",
+            "fit_split": "val",
+            "test_storms": ["BOB01"],
+            "synthetic": "no",
+            "levels": {
+                "0.90": {
+                    "nominal": 0.9,
+                    "absolute_residual_quantile_kt": 14.0,
+                    "n": 8,
+                    "status": "uncalibrated",
+                    "eval_split": "test",
+                }
+            },
+        },
+    }
+    (run_dir / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+
+    expected_banner = research_disclaimer_banner(run_id=run_id, dataset="nasa", model="simple_cnn")
+    resolved = SpaceApp.resolve_banner(config, root=tmp_path)
+    assert resolved == expected_banner
+    assert "Active research prototype" in resolved
+
+    idle_active = SpacePage.idle(config)
+    assert idle_active.permanent_banner == expected_banner
+
+    # 3. View with uncalibrated real run shows numeric wind and research banner
+    view = SpacePage.view(
+        spiral_frame(32),
+        None,
+        "(none)",
+        None,
+        None,
+        config=config,
+        checkpoint=weights,
+    )
+    assert view.permanent_banner == expected_banner
+    assert view.show_wind is True
+    assert view.wind.startswith("48.0 kt")
+    assert "uncalibrated" in view.confidence
+    assert view.interval == "—"
+
