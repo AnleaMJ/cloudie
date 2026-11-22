@@ -673,26 +673,40 @@ class ConfidenceScore:
             return False
 
         block = ConfidenceScore._quantile_block(record)
-        if not isinstance(block, dict):
-            return False
-        if str(block.get("eval_split", "")).strip() != "test":
-            return False
-        block_syn = record.get("synthetic", block.get("synthetic"))
-        if block_syn in {"yes", "mixed", True}:
-            return False
-        storms = block.get("test_storms")
-        if isinstance(storms, (list, tuple)) and not all(str(s).strip() for s in storms):
-            return False
-        rows = ConfidenceScore._level_rows(block)
-        if rows:
-            chosen = ConfidenceScore._chosen_row(rows)
-            if chosen is not None and chosen.get("eval_split") in (None, "test"):
-                try:
-                    count = int(float(chosen["n"]))
-                    if count >= 1:
-                        return True
-                except (KeyError, TypeError, ValueError):
-                    pass
+        if isinstance(block, dict):
+            if str(block.get("eval_split", "")).strip() != "test":
+                return False
+            storms = block.get("test_storms")
+            if not isinstance(storms, (list, tuple)) or not storms:
+                return False
+            if not all(str(storm).strip() for storm in storms):
+                return False
+            block_syn = record.get("synthetic", block.get("synthetic"))
+            if block_syn in {"yes", "mixed", True}:
+                return False
+            rows = ConfidenceScore._level_rows(block)
+            if rows:
+                chosen = ConfidenceScore._chosen_row(rows)
+                if chosen is not None and chosen.get("eval_split") in (None, "test"):
+                    try:
+                        count = int(float(chosen["n"]))
+                        if count >= 1:
+                            return True
+                    except (KeyError, TypeError, ValueError):
+                        pass
+
+        test_block = record.get("test")
+        if (
+            isinstance(test_block, dict)
+            and test_block.get("scored", True) is not False
+            and test_block.get("eval_split") == "test"
+        ):
+            try:
+                count = int(float(test_block.get("n", 0)))
+                if count >= 1:
+                    return True
+            except (KeyError, TypeError, ValueError):
+                pass
         return False
 
 
