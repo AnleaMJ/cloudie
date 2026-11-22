@@ -119,15 +119,15 @@ predict:
     refusal: "not a tropical cyclone IR image"
     grayscale_tolerance: 0.08
     min_std: 0.02
-    min_symmetry: 0.45
-    min_cold_concentration: 0.36
+    min_symmetry: 0.15
+    min_cold_concentration: 0.25
     cold_radius_fraction: 0.45
     cold_tail_fraction: 0.25
     eye_radius_fraction: 0.12
     eyewall_outer_fraction: 0.32
     outer_inner_fraction: 0.55
     outer_outer_fraction: 0.95
-    min_wall_contrast: 0.45
+    min_wall_contrast: 0.22
     radial_bins: 8
     cold_value: auto
     max_dropout_std_kt: 50

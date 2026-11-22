@@ -623,3 +623,10 @@ def test_space_app_resolve_banner_dynamic(tmp_path: Path) -> None:
     assert "uncalibrated" in view.confidence
     assert view.interval == "—"
 
+
+def test_space_app_css_banner_dark_mode_contrast() -> None:
+    """CSS forces dark text on #no-trained-model-banner and child elements for dark-mode readability."""
+    from space.app import SpaceApp
+
+    assert "#no-trained-model-banner, #no-trained-model-banner *" in SpaceApp.CSS
+    assert "color: #4a2c22 !important;" in SpaceApp.CSS
