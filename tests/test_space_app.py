@@ -21,8 +21,9 @@ REFUSAL = "not a tropical cyclone IR image"
 def _clear_space_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CLOUDIE_CHECKPOINT", raising=False)
     monkeypatch.delenv("CLOUDIE_HF_MODEL_REPO", raising=False)
-    # Importing the Space builds the page and would otherwise list the real Hub.
+    # Importing the Space builds the page and would otherwise use live Hub services.
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "False")
     monkeypatch.setattr("src.inference.RunCheckpoint.list_files", lambda repo_id: [])
 
 
