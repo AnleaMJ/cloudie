@@ -480,6 +480,9 @@ class SpaceApp:
       padding: 0.85rem 1rem;
       font-family: "Avenir Next", "Segoe UI", sans-serif;
     }
+    #no-trained-model-banner, #no-trained-model-banner * {
+      color: #4a2c22 !important;
+    }
     """
 
     @staticmethod

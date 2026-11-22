@@ -837,3 +837,29 @@ def test_uncalibrated_held_out_test_run_returns_ok_and_wind_kt(
     assert RunCheckpoint.resolve_banner(config, root=tmp_path) == expected_banner
 
 
+def test_gate_accepts_weak_depression_under_relaxed_thresholds() -> None:
+    """Disorganized weak depression frames pass relaxed gate thresholds while non-cyclones stay rejected."""
+    from src.inference import GateSettings
+
+    config = _config()
+    settings = GateSettings.from_config(config)
+    assert settings.min_symmetry == 0.15
+    assert settings.min_cold_concentration == 0.25
+    assert settings.min_wall_contrast == 0.22
+
+    # Non-cyclones remain rejected
+    assert CycloneImageGate.assess(uniform_noise(48), settings).accepted is False
+    assert CycloneImageGate.assess(clear_sky(48), settings).accepted is False
+    assert CycloneImageGate.assess(stratiform(48), settings).accepted is False
+    assert CycloneImageGate.assess(np.zeros((16, 16), dtype=np.float32), settings).accepted is False
+
+    # Weak disorganized depression (accepted under relaxed thresholds, rejected by old 0.45/0.36/0.45 thresholds)
+    weak_depression = 0.55 * spiral_frame(48) + 0.45 * uniform_noise(48)
+    report = CycloneImageGate.assess(weak_depression, settings)
+    assert report.accepted is True
+    assert report.symmetry >= 0.15
+    assert report.cold_concentration >= 0.25
+    assert report.wall_contrast >= 0.22
+
+
+
