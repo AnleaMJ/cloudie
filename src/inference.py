@@ -1359,6 +1359,14 @@ class RunCheckpoint:
             except ValueError:
                 continue
         if downloaded is None and not selected:
+            for try_name in (name, f"runs/{name}"):
+                try:
+                    downloaded = RunCheckpoint.download(repo, try_name)
+                    active_prefix = ""
+                    break
+                except ValueError:
+                    continue
+        if downloaded is None and not selected:
             cand_runs = []
             try:
                 from huggingface_hub import list_repo_files
