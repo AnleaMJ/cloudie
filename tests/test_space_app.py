@@ -21,7 +21,9 @@ REFUSAL = "not a tropical cyclone IR image"
 def _clear_space_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CLOUDIE_CHECKPOINT", raising=False)
     monkeypatch.delenv("CLOUDIE_HF_MODEL_REPO", raising=False)
-    # Importing the Space builds the page and would otherwise use live Hub services.
+    # Importing the Space builds the page. Listing goes through RunCheckpoint.list_files;
+    # HF_HUB_OFFLINE keeps that seam from calling the Hub. Gradio's own analytics thread
+    # calls the Hub telemetry endpoint directly and does not honor HF_HUB_OFFLINE.
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "False")
     monkeypatch.setattr("src.inference.RunCheckpoint.list_files", lambda repo_id: [])
