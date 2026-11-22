@@ -1247,6 +1247,11 @@ class RunCheckpoint:
     A real checkpoint produces a wind only when its run record passes
     :meth:`ConfidenceScore._held_out_storm_check`. Until that record exists,
     this returns no wind. A synthetic file is flagged by ``is_synthetic``.
+
+    When no run id is selected, run directories on the Hub are discovered
+    through :meth:`list_files`. Tests replace that method. A failed or empty
+    listing does not invent run ids; the configured checkpoint name is then
+    fetched from the repo root.
     """
 
     ENV_REPO = "CLOUDIE_HF_MODEL_REPO"
@@ -1315,6 +1320,55 @@ class RunCheckpoint:
         return Path(fetched)
 
     @staticmethod
+    def list_files(repo_id: str) -> list[str]:
+        """List files in a model repo. Tests replace this method.
+
+        ``HF_HUB_OFFLINE`` yields no listing and does not contact the Hub.
+        """
+        offline = os.environ.get("HF_HUB_OFFLINE", "").strip().lower()
+        message = (
+            "The Hugging Face model repo could not be listed. "
+            "There is no model output. This is not a forecast."
+        )
+        if offline in {"1", "true", "yes", "on"}:
+            raise ValueError(message)
+        try:
+            from huggingface_hub import list_repo_files
+        except ImportError as exc:
+            raise ValueError(message) from exc
+        try:
+            names = list_repo_files(repo_id=repo_id, repo_type="model")
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            raise ValueError(message) from exc
+        return [str(name) for name in names]
+
+    @staticmethod
+    def _listed_run_ids(repo: str, suffix: str) -> list[str]:
+        """Parent directories of Hub files ending in ``suffix``.
+
+        A listing failure is an empty result. Stored run ids are never substituted.
+        """
+        try:
+            filenames = RunCheckpoint.list_files(repo)
+        except ValueError:
+            return []
+        found: list[str] = []
+        for filename in filenames:
+            text = str(filename).replace("\\", "/")
+            if not text.endswith(suffix):
+                continue
+            parts = text.split("/")
+            if len(parts) < 2:
+                continue
+            run_id = parts[-2]
+            if not run_id or run_id in {".", ".."} or run_id in found:
+                continue
+            found.append(run_id)
+        return found
+
+    @staticmethod
     def resolve(config: dict, root: Path | None = None) -> tuple[Path | None, dict]:
         """Return the checkpoint and a config that can see its ``metrics.json``."""
         override = os.environ.get(RunCheckpoint.ENV_FILE, "").strip()
@@ -1359,24 +1413,7 @@ class RunCheckpoint:
             except ValueError:
                 continue
         if downloaded is None and not selected:
-            cand_runs = []
-            try:
-                from huggingface_hub import list_repo_files
-
-                for f in list_repo_files(repo):
-                    if f.endswith(name):
-                        parts = f.split("/")
-                        if len(parts) >= 2:
-                            cid = parts[-2]
-                            if cid not in cand_runs:
-                                cand_runs.append(cid)
-            except Exception:
-                if repo == "Anlea/cloudie-weights":
-                    cand_runs = [
-                        "nasa-resnet18-20261121T180837Z-1795284517431658868-03243d0d",
-                        "incyde-resnet18-20261121T212138Z-1795296098584083196-b6801899",
-                    ]
-            for cid in cand_runs:
+            for cid in RunCheckpoint._listed_run_ids(repo, name):
                 for try_pfx in (f"runs/{cid}/", f"{cid}/"):
                     try:
                         downloaded = RunCheckpoint.download(repo, f"{try_pfx}{name}")
@@ -1386,6 +1423,14 @@ class RunCheckpoint:
                         continue
                 if downloaded is not None:
                     break
+            if downloaded is None:
+                for try_pfx in ("", "runs/"):
+                    try:
+                        downloaded = RunCheckpoint.download(repo, f"{try_pfx}{name}")
+                        active_prefix = try_pfx
+                        break
+                    except ValueError:
+                        continue
         if downloaded is None:
             return None, config
         try:
@@ -1480,24 +1525,7 @@ class RunCheckpoint:
                     except Exception:
                         pass
             else:
-                cand_runs = []
-                try:
-                    from huggingface_hub import list_repo_files
-
-                    for f in list_repo_files(repo):
-                        if f.endswith("metrics.json"):
-                            parts = f.split("/")
-                            if len(parts) >= 2:
-                                cid = parts[-2]
-                                if cid not in cand_runs:
-                                    cand_runs.append(cid)
-                except Exception:
-                    if repo == "Anlea/cloudie-weights":
-                        cand_runs = [
-                            "nasa-resnet18-20261121T180837Z-1795284517431658868-03243d0d",
-                            "incyde-resnet18-20261121T212138Z-1795296098584083196-b6801899",
-                        ]
-                for cid in cand_runs:
+                for cid in RunCheckpoint._listed_run_ids(repo, "metrics.json"):
                     for pfx in (f"{cid}/", f"runs/{cid}/"):
                         try:
                             m_path = RunCheckpoint.download(repo, f"{pfx}metrics.json")
