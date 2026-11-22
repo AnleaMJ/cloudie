@@ -21,6 +21,9 @@ REFUSAL = "not a tropical cyclone IR image"
 def _clear_space_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CLOUDIE_CHECKPOINT", raising=False)
     monkeypatch.delenv("CLOUDIE_HF_MODEL_REPO", raising=False)
+    # Importing the Space builds the page and would otherwise list the real Hub.
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr("src.inference.RunCheckpoint.list_files", lambda repo_id: [])
 
 
 def _config() -> dict:
@@ -214,15 +217,26 @@ def test_vercel_import_does_not_load_the_space_or_torch() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
-def test_app_is_importable_and_the_banner_is_on_the_page() -> None:
+def test_app_is_importable_and_the_banner_is_on_the_page(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("gradio")
+    listed: list[str] = []
+
+    def fake_list(repo_id: str) -> list[str]:
+        listed.append(repo_id)
+        return []
+
+    monkeypatch.setattr("src.inference.RunCheckpoint.list_files", fake_list)
     import space.app as space_app
+
+    listed.clear()
+    space_app.demo = space_app.SpaceApp.build()
     from cloudie.app import NO_TRAINED_MODEL_BANNER
 
     assert space_app.demo is not None
     assert callable(space_app.demo.launch)
     assert space_app.NO_TRAINED_MODEL_BANNER == NO_TRAINED_MODEL_BANNER
     rendered = _rendered(space_app.demo)
+    assert listed == ["Anlea/cloudie-weights"]
     assert NO_TRAINED_MODEL_BANNER in rendered
     assert "uncalibrated" in rendered
     assert "Wind interval (uncalibrated)" in rendered
@@ -406,11 +420,17 @@ def test_hub_repo_is_fetched_only_from_config_or_env(tmp_path: Path, monkeypatch
     config = _isolated(_config(), tmp_path)
     weights = _joblib(tmp_path / "hub.joblib", config, 40.0)
     calls: list[tuple[str, str]] = []
+    listed: list[str] = []
+
+    def fake_list(repo_id: str) -> list[str]:
+        listed.append(repo_id)
+        return []
 
     def fake_download(repo_id: str, filename: str) -> Path:
         calls.append((repo_id, filename))
         return weights
 
+    monkeypatch.setattr(space_app.RunCheckpoint, "list_files", fake_list)
     monkeypatch.setattr(space_app.RunCheckpoint, "download", fake_download)
     quiet = space_app.SpacePage.view(
         spiral_frame(32),
@@ -422,6 +442,7 @@ def test_hub_repo_is_fetched_only_from_config_or_env(tmp_path: Path, monkeypatch
         resolve_checkpoint=True,
     )
     assert calls == []
+    assert listed == []
     assert quiet.show_wind is False
 
     config["paths"]["hf_model_repo"] = "Anlea/cloudie-weights"
@@ -435,10 +456,12 @@ def test_hub_repo_is_fetched_only_from_config_or_env(tmp_path: Path, monkeypatch
         resolve_checkpoint=True,
     )
     assert ("Anlea/cloudie-weights", "checkpoint.pt") in calls
+    assert listed == ["Anlea/cloudie-weights", "Anlea/cloudie-weights"]
     assert from_config.show_wind is True
     assert "software check" in from_config.status
 
     calls.clear()
+    listed.clear()
     monkeypatch.setenv("CLOUDIE_HF_MODEL_REPO", "Anlea/other-weights")
     space_app.SpacePage.view(
         spiral_frame(32),
@@ -450,6 +473,7 @@ def test_hub_repo_is_fetched_only_from_config_or_env(tmp_path: Path, monkeypatch
         resolve_checkpoint=True,
     )
     assert ("Anlea/other-weights", "checkpoint.pt") in calls
+    assert listed == ["Anlea/other-weights", "Anlea/other-weights"]
 
 
 def test_hub_real_checkpoint_waits_for_the_held_out_record(
@@ -457,6 +481,7 @@ def test_hub_real_checkpoint_waits_for_the_held_out_record(
 ) -> None:
     pytest.importorskip("gradio")
     import space.app as space_app
+    from src.inference import research_disclaimer_banner
 
     config = _isolated(_config(), tmp_path)
     config["paths"]["hf_model_repo"] = "Anlea/cloudie-weights"
@@ -469,6 +494,11 @@ def test_hub_real_checkpoint_waits_for_the_held_out_record(
         wind_averaging="1min",
     )
     record_path = tmp_path / "mirror" / "metrics.json"
+    listed: list[str] = []
+
+    def fake_list(repo_id: str) -> list[str]:
+        listed.append(repo_id)
+        return []
 
     def fake_download(repo_id: str, filename: str) -> Path:
         assert repo_id == "Anlea/cloudie-weights"
@@ -480,6 +510,7 @@ def test_hub_real_checkpoint_waits_for_the_held_out_record(
             return record_path
         raise ValueError(filename)
 
+    monkeypatch.setattr(space_app.RunCheckpoint, "list_files", fake_list)
     monkeypatch.setattr(space_app.RunCheckpoint, "download", fake_download)
     hidden = space_app.SpacePage.view(
         spiral_frame(32),
@@ -492,6 +523,8 @@ def test_hub_real_checkpoint_waits_for_the_held_out_record(
     )
     assert hidden.show_wind is False
     assert "40.0" not in hidden.wind
+    assert hidden.permanent_banner == space_app.NO_TRAINED_MODEL_BANNER
+    assert listed == ["Anlea/cloudie-weights", "Anlea/cloudie-weights"]
 
     _held_out_record(config, record_path.parent)
     record_path.write_text((record_path.parent / "nio-held-out.json").read_text(encoding="utf-8"), encoding="utf-8")
@@ -509,6 +542,11 @@ def test_hub_real_checkpoint_waits_for_the_held_out_record(
     assert shown.wind.startswith("40.0 kt")
     assert shown.interval == "—"
     assert "uncalibrated" in shown.interval_note
+    assert shown.permanent_banner == research_disclaimer_banner(
+        run_id="nio-held-out",
+        model=str(config["model"]["name"]),
+    )
+    assert listed == ["Anlea/cloudie-weights"] * 3
 
 
 def test_space_app_resolve_banner_dynamic(tmp_path: Path) -> None:
@@ -592,5 +630,3 @@ def test_space_app_css_banner_dark_mode_contrast() -> None:
 
     assert "#no-trained-model-banner, #no-trained-model-banner *" in SpaceApp.CSS
     assert "color: #4a2c22 !important;" in SpaceApp.CSS
-
-
