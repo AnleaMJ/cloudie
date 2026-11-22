@@ -1346,8 +1346,9 @@ class RunCheckpoint:
 
     @staticmethod
     def _listed_run_ids(repo: str, suffix: str) -> list[str]:
-        """Parent directories of Hub files ending in ``suffix``.
+        """Run directory names that contain a file named ``suffix``.
 
+        ``runs/<suffix>`` is the generic mirror of a repo-root file, not a run.
         A listing failure is an empty result. Stored run ids are never substituted.
         """
         try:
@@ -1357,13 +1358,11 @@ class RunCheckpoint:
         found: list[str] = []
         for filename in filenames:
             text = str(filename).replace("\\", "/")
-            if not text.endswith(suffix):
-                continue
-            parts = text.split("/")
-            if len(parts) < 2:
+            parts = [part for part in text.split("/") if part not in {"", "."}]
+            if len(parts) < 2 or parts[-1] != suffix:
                 continue
             run_id = parts[-2]
-            if not run_id or run_id in {".", ".."} or run_id in found:
+            if run_id in {".", "..", "runs"} or run_id in found:
                 continue
             found.append(run_id)
         return found
